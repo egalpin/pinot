@@ -90,9 +90,12 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
               // Update the record location when there is a tie to keep the newer record. Note that the record info
               // iterator will return records with incremental doc ids.
               if (currentSegment == segment) {
-                if (comparisonResult >= 0) {
+                if (recordInfo.isComparisonValueNull() || comparisonResult >= 0) {
                   validDocIds.replace(currentRecordLocation.getDocId(), recordInfo.getDocId());
-                  return new RecordLocation(segment, recordInfo.getDocId(), recordInfo.getComparisonValue());
+                  Comparable comparisonValue =
+                      recordInfo.isComparisonValueNull() ? currentRecordLocation.getComparisonValue()
+                          : recordInfo.getComparisonValue();
+                  return new RecordLocation(segment, recordInfo.getDocId(), comparisonValue);
                 } else {
                   return currentRecordLocation;
                 }
@@ -110,7 +113,10 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
                   if (validDocIdsForOldSegment != null) {
                     validDocIdsForOldSegment.remove(currentRecordLocation.getDocId());
                   }
-                  return new RecordLocation(segment, recordInfo.getDocId(), recordInfo.getComparisonValue());
+                  Comparable comparisonValue =
+                      recordInfo.isComparisonValueNull() ? currentRecordLocation.getComparisonValue()
+                          : recordInfo.getComparisonValue();
+                  return new RecordLocation(segment, recordInfo.getDocId(), comparisonValue);
                 } else {
                   return currentRecordLocation;
                 }
@@ -123,7 +129,10 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
                 numKeysInWrongSegment.getAndIncrement();
                 if (comparisonResult >= 0) {
                   validDocIds.add(recordInfo.getDocId());
-                  return new RecordLocation(segment, recordInfo.getDocId(), recordInfo.getComparisonValue());
+                  Comparable comparisonValue =
+                      recordInfo.isComparisonValueNull() ? currentRecordLocation.getComparisonValue()
+                          : recordInfo.getComparisonValue();
+                  return new RecordLocation(segment, recordInfo.getDocId(), comparisonValue);
                 } else {
                   return currentRecordLocation;
                 }
@@ -139,7 +148,10 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
                   currentSegmentName))) {
                 Objects.requireNonNull(currentSegment.getValidDocIds()).remove(currentRecordLocation.getDocId());
                 validDocIds.add(recordInfo.getDocId());
-                return new RecordLocation(segment, recordInfo.getDocId(), recordInfo.getComparisonValue());
+                Comparable comparisonValue =
+                    recordInfo.isComparisonValueNull() ? currentRecordLocation.getComparisonValue()
+                        : recordInfo.getComparisonValue();
+                return new RecordLocation(segment, recordInfo.getDocId(), comparisonValue);
               } else {
                 return currentRecordLocation;
               }
@@ -191,7 +203,8 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
 
             // Update the record location when the new comparison value is greater than or equal to the current value.
             // Update the record location when there is a tie to keep the newer record.
-            if (recordInfo.getComparisonValue().compareTo(currentRecordLocation.getComparisonValue()) >= 0) {
+            if (recordInfo.isComparisonValueNull()
+                || recordInfo.getComparisonValue().compareTo(currentRecordLocation.getComparisonValue()) >= 0) {
               IndexSegment currentSegment = currentRecordLocation.getSegment();
               int currentDocId = currentRecordLocation.getDocId();
               if (segment == currentSegment) {
@@ -200,7 +213,10 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
                 Objects.requireNonNull(currentSegment.getValidDocIds()).remove(currentDocId);
                 validDocIds.add(recordInfo.getDocId());
               }
-              return new RecordLocation(segment, recordInfo.getDocId(), recordInfo.getComparisonValue());
+              Comparable comparisonValue =
+                  recordInfo.isComparisonValueNull() ? currentRecordLocation.getComparisonValue()
+                      : recordInfo.getComparisonValue();
+              return new RecordLocation(segment, recordInfo.getDocId(), comparisonValue);
             } else {
               return currentRecordLocation;
             }
@@ -226,7 +242,8 @@ public class ConcurrentMapPartitionUpsertMetadataManager extends BasePartitionUp
     AtomicReference<GenericRow> previousRecordReference = new AtomicReference<>();
     RecordLocation currentRecordLocation = _primaryKeyToRecordLocationMap.computeIfPresent(
         HashUtils.hashPrimaryKey(recordInfo.getPrimaryKey(), _hashFunction), (pk, recordLocation) -> {
-          if (recordInfo.getComparisonValue().compareTo(recordLocation.getComparisonValue()) >= 0) {
+          if (recordInfo.isComparisonValueNull()
+              || recordInfo.getComparisonValue().compareTo(recordLocation.getComparisonValue()) >= 0) {
             _reuse.clear();
             previousRecordReference.set(recordLocation.getSegment().getRecord(recordLocation.getDocId(), _reuse));
           }

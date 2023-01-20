@@ -26,11 +26,20 @@ public class RecordInfo {
   private final PrimaryKey _primaryKey;
   private final int _docId;
   private final Comparable _comparisonValue;
+  private final boolean _isComparisonValueNull;
+
+  public RecordInfo(PrimaryKey primaryKey, int docId, Comparable comparisonValue, boolean isComparisonValueNull) {
+    _primaryKey = primaryKey;
+    _docId = docId;
+    _comparisonValue = comparisonValue;
+    _isComparisonValueNull = isComparisonValueNull;
+  }
 
   public RecordInfo(PrimaryKey primaryKey, int docId, Comparable comparisonValue) {
     _primaryKey = primaryKey;
     _docId = docId;
     _comparisonValue = comparisonValue;
+    _isComparisonValueNull = false;
   }
 
   public PrimaryKey getPrimaryKey() {
@@ -43,5 +52,9 @@ public class RecordInfo {
 
   public Comparable getComparisonValue() {
     return _comparisonValue;
+  }
+
+  public boolean isComparisonValueNull() {
+    return _isComparisonValueNull;
   }
 }

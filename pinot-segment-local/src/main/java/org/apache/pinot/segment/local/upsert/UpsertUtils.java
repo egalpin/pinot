@@ -87,7 +87,7 @@ public class UpsertUtils {
     public RecordInfo getRecordInfo(int docId) {
       PrimaryKey primaryKey = _primaryKeyReader.getPrimaryKey(docId);
       Comparable comparisonValue = (Comparable) getValue(_comparisonColumnReader, docId);
-      return new RecordInfo(primaryKey, docId, comparisonValue);
+      return new RecordInfo(primaryKey, docId, comparisonValue, _comparisonColumnReader.isNull(docId));
     }
 
     @Override
