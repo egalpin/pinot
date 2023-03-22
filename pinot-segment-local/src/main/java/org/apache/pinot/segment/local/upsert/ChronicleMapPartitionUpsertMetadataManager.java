@@ -71,6 +71,7 @@ public class ChronicleMapPartitionUpsertMetadataManager extends BasePartitionUps
             HashUtils.hashPrimaryKey(new PrimaryKey(primaryKeyColumns.toArray()), _hashFunction))
         .putReturnsNull(true)
         .removeReturnsNull(true)
+        .averageValue(new RecordLocation(null, 1, 1))
         .create();
   }
 
