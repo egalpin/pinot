@@ -110,6 +110,11 @@
       <groupId>com.google.auto.service</groupId>
       <artifactId>auto-service</artifactId>
     </dependency>
+    <dependency>
+      <groupId>net.openhft</groupId>
+      <artifactId>chronicle-map</artifactId>
+<!--      <version>${chronicle.version}</version>-->
+    </dependency>
 
     <!-- Test dependencies -->
     <dependency>

@@ -36,10 +36,10 @@ public class HashUtils {
     return Hashing.md5().hashBytes(bytes).asBytes();
   }
 
-  public static Object hashPrimaryKey(PrimaryKey primaryKey, HashFunction hashFunction) {
+  public static ByteArray hashPrimaryKey(PrimaryKey primaryKey, HashFunction hashFunction) {
     switch (hashFunction) {
       case NONE:
-        return primaryKey;
+        return new ByteArray(primaryKey.asBytes());
       case MD5:
         return new ByteArray(HashUtils.hashMD5(primaryKey.asBytes()));
       case MURMUR3:

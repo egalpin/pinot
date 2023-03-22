@@ -55,8 +55,8 @@ public class TableUpsertMetadataManagerFactory {
                 metadataManagerClass, tableNameWithType), e);
       }
     } else {
-      LOGGER.info("Creating ConcurrentMapTableUpsertMetadataManager for table: {}", tableNameWithType);
-      metadataManager = new ConcurrentMapTableUpsertMetadataManager();
+      LOGGER.info("Creating ChronicleMapTableUpsertMetadataManager for table: {}", tableNameWithType);
+      metadataManager = new ChronicleMapTableUpsertMetadataManager();
     }
 
     metadataManager.init(tableConfig, schema, tableDataManager, serverMetrics);

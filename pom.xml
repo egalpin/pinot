@@ -170,6 +170,8 @@
     <protobuf.version>3.22.0</protobuf.version>
     <grpc.version>1.53.0</grpc.version>
     <confluent.version>5.5.3</confluent.version>
+    <chronicle.version>3.23.5</chronicle.version>
+    <jna.version>5.8.0</jna.version>
 
     <!-- Checkstyle violation prop.-->
     <checkstyle.violation.severity>warning</checkstyle.violation.severity>
@@ -1216,6 +1218,38 @@
         <artifactId>ipaddress</artifactId>
         <version>5.3.4</version>
       </dependency>
+
+      <!-- chronicle-map -->
+      <dependency>
+        <groupId>net.java.dev.jna</groupId>
+        <artifactId>jna</artifactId>
+        <version>${jna.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>net.java.dev.jna</groupId>
+        <artifactId>jna-platform</artifactId>
+        <version>${jna.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>net.openhft</groupId>
+        <artifactId>chronicle-map</artifactId>
+        <version>${chronicle.version}</version>
+        <exclusions>
+          <exclusion>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna-platform</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+
     </dependencies>
   </dependencyManagement>
   <build>
