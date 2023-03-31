@@ -110,6 +110,11 @@
       <artifactId>commons-math3</artifactId>
     </dependency>
     <dependency>
+      <groupId>net.openhft</groupId>
+      <artifactId>chronicle-bytes</artifactId>
+      <version>2.24ea6</version>
+    </dependency>
+    <dependency>
       <groupId>org.testng</groupId>
       <artifactId>testng</artifactId>
     </dependency>
@@ -133,6 +138,32 @@
     <dependency>
       <groupId>net.sf.jopt-simple</groupId>
       <artifactId>jopt-simple</artifactId>
+    </dependency>
+<!--    <dependency>-->
+<!--      <groupId>com.oath.halodb</groupId>-->
+<!--      <artifactId>halodb</artifactId>-->
+<!--      <version>0.5.3</version>-->
+<!--    </dependency>-->
+    <dependency>
+      <groupId>org.lmdbjava</groupId>
+      <artifactId>lmdbjava</artifactId>
+      <version>0.8.3</version>
+    </dependency>
+    <dependency>
+      <groupId>org.agrona</groupId>
+      <artifactId>agrona</artifactId>
+      <version>1.17.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-collections4</artifactId>
+      <version>4.4</version>
+    </dependency>
+    <!--    mapDB-->
+    <dependency>
+      <groupId>org.mapdb</groupId>
+      <artifactId>mapdb</artifactId>
+      <version>3.0.9</version>
     </dependency>
   </dependencies>
   <build>
