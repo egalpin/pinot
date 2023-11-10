@@ -53,7 +53,7 @@ public class MockRoutingManagerFactory {
   private static final String TIME_BOUNDARY_COLUMN = "ts";
   private static final String HOST_NAME = "localhost";
 
-  private final Map<String, String> _tableNameMap;
+  private final Map<String, List<String>> _tableNameMap;
   private final Map<String, Schema> _schemaMap;
   private final Set<String> _hybridTables;
   private final Map<String, ServerInstance> _serverInstances;
@@ -82,8 +82,8 @@ public class MockRoutingManagerFactory {
 
   private void registerTableNameWithType(Schema schema, String tableNameWithType) {
     String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
-    _tableNameMap.put(tableNameWithType, tableNameWithType);
-    _tableNameMap.put(rawTableName, rawTableName);
+    _tableNameMap.put(tableNameWithType, Collections.singletonList(tableNameWithType));
+    _tableNameMap.put(rawTableName, Collections.singletonList(rawTableName));
     _schemaMap.put(rawTableName, schema);
   }
 
