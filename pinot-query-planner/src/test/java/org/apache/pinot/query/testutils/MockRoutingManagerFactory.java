@@ -53,7 +53,7 @@ public class MockRoutingManagerFactory {
   private static final String TIME_BOUNDARY_COLUMN = "ts";
   private static final String HOST_NAME = "localhost";
 
-  private final Map<String, List<String>> _tableNameMap;
+  private final Map<String, String> _tableNameMap;
   private final Map<String, Schema> _schemaMap;
   private final Set<String> _hybridTables;
   private final Map<String, ServerInstance> _serverInstances;

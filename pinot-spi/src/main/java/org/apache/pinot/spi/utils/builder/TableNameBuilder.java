@@ -27,6 +27,7 @@ import org.apache.pinot.spi.config.table.TableType;
 public class TableNameBuilder {
   public static final TableNameBuilder OFFLINE = new TableNameBuilder(TableType.OFFLINE);
   public static final TableNameBuilder REALTIME = new TableNameBuilder(TableType.REALTIME);
+  public static final TableNameBuilder LOGICAL = new TableNameBuilder(TableType.LOGICAL);
 
   private static final String TYPE_SUFFIX_SEPARATOR = "_";
 
@@ -44,9 +45,10 @@ public class TableNameBuilder {
   public static TableNameBuilder forType(TableType tableType) {
     if (tableType == TableType.OFFLINE) {
       return OFFLINE;
-    } else {
+    } else if (tableType == TableType.REALTIME){
       return REALTIME;
     }
+    return LOGICAL;
   }
 
   /**
@@ -87,6 +89,9 @@ public class TableNameBuilder {
     if (REALTIME.tableHasTypeSuffix(tableName)) {
       return TableType.REALTIME;
     }
+    if (LOGICAL.tableHasTypeSuffix(tableName)) {
+      return TableType.LOGICAL;
+    }
     return null;
   }
 
@@ -106,6 +111,9 @@ public class TableNameBuilder {
     if (REALTIME.tableHasTypeSuffix(tableName)) {
       return tableName.substring(0, tableName.length() - REALTIME._typeSuffix.length());
     }
+    if (LOGICAL.tableHasTypeSuffix(tableName)) {
+      return tableName.substring(0, tableName.length() - LOGICAL._typeSuffix.length());
+    }
     return tableName;
   }
 
@@ -116,6 +124,7 @@ public class TableNameBuilder {
    * @return Whether the resource name represents a table resource
    */
   public static boolean isTableResource(String resourceName) {
+    // explicitly do not include LOGICAL because it's not a physical resource
     return OFFLINE.tableHasTypeSuffix(resourceName) || REALTIME.tableHasTypeSuffix(resourceName);
   }
 

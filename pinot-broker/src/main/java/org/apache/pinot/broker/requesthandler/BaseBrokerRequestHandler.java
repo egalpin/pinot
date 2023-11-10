@@ -454,7 +454,7 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
       // Get the tables hit by the request
       String offlineTableName = null;
       String realtimeTableName = null;
-      String logicalTableName = null;
+      LogicalTable logicalTable;
       TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
       if (tableType == TableType.OFFLINE) {
         // Offline table
@@ -470,18 +470,17 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
         // Logical table handling
         // expand logical table
         // Hybrid table (check both OFFLINE and REALTIME)
-        logicalTableName = rawTableName;
-        LogicalTable logicalTable = _tableCache.getLogicalTable(logicalTableName);
-        String offlineTableNameToCheck = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
-        if (_routingManager.routingExists(offlineTableNameToCheck)) {
-          offlineTableName = offlineTableNameToCheck;
-        }
-        String realtimeTableNameToCheck = TableNameBuilder.REALTIME.tableNameWithType(tableName);
-        if (_routingManager.routingExists(realtimeTableNameToCheck)) {
-          realtimeTableName = realtimeTableNameToCheck;
-        }
+        logicalTable = _tableCache.explodeLogicalTable(rawTableName);
       }
 
+      String offlineTableNameToCheck = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
+      if (_routingManager.routingExists(offlineTableNameToCheck)) {
+        offlineTableName = offlineTableNameToCheck;
+      }
+      String realtimeTableNameToCheck = TableNameBuilder.REALTIME.tableNameWithType(tableName);
+      if (_routingManager.routingExists(realtimeTableNameToCheck)) {
+        realtimeTableName = realtimeTableNameToCheck;
+      }
       TableConfig offlineTableConfig =
           _tableCache.getTableConfig(TableNameBuilder.OFFLINE.tableNameWithType(rawTableName));
       TableConfig realtimeTableConfig =

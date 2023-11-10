@@ -19,5 +19,5 @@
 package org.apache.pinot.spi.config.table;
 
 public enum TableType {
-  OFFLINE, REALTIME
+  OFFLINE, REALTIME, LOGICAL
 }

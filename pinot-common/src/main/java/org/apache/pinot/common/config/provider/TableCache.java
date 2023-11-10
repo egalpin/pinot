@@ -44,6 +44,7 @@ import org.apache.pinot.spi.config.provider.SchemaChangeListener;
 import org.apache.pinot.spi.config.provider.TableConfigChangeListener;
 import org.apache.pinot.spi.config.table.QueryConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.DimensionFieldSpec;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
@@ -86,7 +87,8 @@ public class TableCache implements PinotConfigProvider {
   private final Map<String, String> _schemaNameMap = new ConcurrentHashMap<>();
   // Key is lower case table name (with or without type suffix), value is actual table name
   // For case-insensitive mode only
-  private final Map<String, List<String>> _tableNameMap = new ConcurrentHashMap<>();
+  private final Map<String, String> _tableNameMap = new ConcurrentHashMap<>();
+  private final Map<String, List<String>> _logicalTableNameMap = new ConcurrentHashMap<>();
 
   private final ZkSchemaChangeListener _zkSchemaChangeListener = new ZkSchemaChangeListener();
   // Key is schema name, value is schema info
@@ -140,19 +142,18 @@ public class TableCache implements PinotConfigProvider {
    */
   @Nullable
   public String getActualTableName(String tableName) {
-    String nameToCheck = _ignoreCase ? tableName.toLowerCase() : tableName;
-    List<String> tables = _tableNameMap.get(nameToCheck);
-    if (tables == null || tables.size() != 1) {
-      return null;
+    if (_ignoreCase) {
+      return _tableNameMap.get(tableName.toLowerCase());
+    } else {
+      return _tableNameMap.get(tableName);
     }
-    return tables.get(0);
   }
 
   /**
    * Returns a map from table name to actual table name. For case-insensitive case, the keys of the map are in lower
    * case.
    */
-  public Map<String, List<String>> getTableNameMap() {
+  public Map<String, String> getTableNameMap() {
     return _tableNameMap;
   }
 
@@ -261,25 +262,42 @@ public class TableCache implements PinotConfigProvider {
 
   private void putTableConfig(ZNRecord znRecord)
       throws IOException {
-    TableConfig tableConfig = TableConfigUtils.fromZNRecord(znRecord);
-    String tableNameWithType = tableConfig.getTableName();
-    _tableConfigInfoMap.put(tableNameWithType, new TableConfigInfo(tableConfig));
+    // TODO(egalpin): put this somewhere better
+    boolean isLogicalTable =
+        TableType.valueOf(znRecord.getSimpleField(TableConfig.TABLE_TYPE_KEY)) == TableType.LOGICAL;
 
-    String schemaName = tableConfig.getValidationConfig().getSchemaName();
+    String tableNameWithType = znRecord.getSimpleField(TableConfig.TABLE_NAME_KEY);
     String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
-    if (schemaName != null && !schemaName.equals(rawTableName)) {
-      _schemaNameMap.put(tableNameWithType, schemaName);
-      _schemaNameMap.put(rawTableName, schemaName);
+    if (isLogicalTable) {
+      List<String> associatedTables = znRecord.getListField(TableConfig.ASSOCIATED_TABLES);
+      if (_ignoreCase) {
+        _logicalTableNameMap.put(tableNameWithType.toLowerCase(), associatedTables);
+        _logicalTableNameMap.put(rawTableName.toLowerCase(), associatedTables);
+      } else {
+        _logicalTableNameMap.put(tableNameWithType, associatedTables);
+        _logicalTableNameMap.put(rawTableName, associatedTables);
+      }
     } else {
-      removeSchemaName(tableNameWithType);
+      TableConfig tableConfig = TableConfigUtils.fromZNRecord(znRecord);
+      tableNameWithType = tableConfig.getTableName();
+      rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
+      _tableConfigInfoMap.put(tableNameWithType, new TableConfigInfo(tableConfig));
+
+      String schemaName = tableConfig.getValidationConfig().getSchemaName();
+      if (schemaName != null && !schemaName.equals(rawTableName)) {
+        _schemaNameMap.put(tableNameWithType, schemaName);
+        _schemaNameMap.put(rawTableName, schemaName);
+      } else {
+        removeSchemaName(tableNameWithType);
+      }
     }
 
     if (_ignoreCase) {
-      _tableNameMap.put(tableNameWithType.toLowerCase(), Collections.singletonList(tableNameWithType));
-      _tableNameMap.put(rawTableName.toLowerCase(), Collections.singletonList(rawTableName));
+      _tableNameMap.put(tableNameWithType.toLowerCase(), tableNameWithType);
+      _tableNameMap.put(rawTableName.toLowerCase(), rawTableName);
     } else {
-      _tableNameMap.put(tableNameWithType, Collections.singletonList(tableNameWithType));
-      _tableNameMap.put(rawTableName, Collections.singletonList(rawTableName));
+      _tableNameMap.put(tableNameWithType, tableNameWithType);
+      _tableNameMap.put(rawTableName, rawTableName);
     }
   }
 
@@ -404,19 +422,37 @@ public class TableCache implements PinotConfigProvider {
     return tableConfigs;
   }
 
-  public List<String> getPhysicalTableNames(String rawLogicalTableName) {
-//    List<String> associatedTables =
-//    TableConfigInfo tableConfigInfo = _tableConfigInfoMap.get(rawLogicalTableName);
-//    String offlineTableNameToCheck = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
-//    if (_routingManager.routingExists(offlineTableNameToCheck)) {
-//      offlineTableName = offlineTableNameToCheck;
-//    }
-//    String realtimeTableNameToCheck = TableNameBuilder.REALTIME.tableNameWithType(tableName);
-//    if (_routingManager.routingExists(realtimeTableNameToCheck)) {
-//      realtimeTableName = realtimeTableNameToCheck;
-//    }
-//
-    return Collections.emptyList();
+  // Note: this should be executed at query time in case the associated tables themselves have changed ex. if one
+  // logical table is associated with another logical table
+  public LogicalTable explodeLogicalTable(String tableName) {
+    LogicalTable logicalTable = new LogicalTable();
+    List<String> associatedTables = _logicalTableNameMap.get(tableName);
+    if (associatedTables == null) {
+      return new LogicalTable();
+    }
+
+    // For each associated table, recursively expand it in case the associated table is a Logical table
+    TableConfigInfo offlineConfigInfo;
+    TableConfigInfo realtimeConfigInfo;
+    for (String assocTable : associatedTables) {
+      TableType tableType = TableNameBuilder.getTableTypeFromTableName(assocTable);
+      if (tableType == null) {
+        // Hybrid table
+        offlineConfigInfo = _tableConfigInfoMap.get(TableNameBuilder.OFFLINE.tableNameWithType(assocTable));
+        realtimeConfigInfo = _tableConfigInfoMap.get(TableNameBuilder.OFFLINE.tableNameWithType(assocTable));
+        logicalTable.addHybridTable(offlineConfigInfo._tableConfig, realtimeConfigInfo._tableConfig);
+      } else if (tableType == TableType.LOGICAL) {
+        logicalTable.addAll(explodeLogicalTable(assocTable));
+      } else if (tableType == TableType.REALTIME) {
+        realtimeConfigInfo = _tableConfigInfoMap.get(TableNameBuilder.REALTIME.tableNameWithType(assocTable));
+        logicalTable.addRealtimeTable(realtimeConfigInfo._tableConfig);
+      } else if (tableType == TableType.OFFLINE) {
+        offlineConfigInfo = _tableConfigInfoMap.get(TableNameBuilder.OFFLINE.tableNameWithType(assocTable));
+        logicalTable.addRealtimeTable(offlineConfigInfo._tableConfig);
+      }
+    }
+
+    return logicalTable;
   }
 
   private void notifySchemaChangeListeners() {
@@ -569,3 +605,47 @@ public class TableCache implements PinotConfigProvider {
     }
   }
 }
+
+/**
+ * HYPOTHETICAL LOGICAL TABLE EXAMPLE
+ {
+   "id": "myLogical_LOGICAL",
+   "simpleFields": {
+     "tableType": "LOGICAL",
+     "tenants": "{}",
+     "tableIndexConfig": "{}",
+     "routing": "{}",
+     "metadata": "{}",
+     "ingestionConfig": "{}",
+     "segmentsConfig": "{}",
+     "quota": "{}",
+     "query": "{}",
+     "isDimTable": "false",
+     "tableName": "myLogical_LOGICAL"
+   },
+   "mapFields": {},
+   "listFields": {
+     "associatedTables": ["foo_REALTIME", "bar_REALTIME", "baz_OFFLINE", "myHybrid", "myOtherLogical_LOGICAL"]
+   }
+ }
+
+ * EXISTING REALTIME TABLE EXAMPLE
+ {
+   "id": "foo_REALTIME",
+   "simpleFields": {
+     "tableType": "REALTIME",
+     "tenants": "{\"broker\":\"DefaultTenant\",\"server\":\"DefaultTenant\",\"tagOverrideConfig\":{}}",
+     "tableIndexConfig": "",
+     "routing": "{\"segmentPrunerTypes\":[\"partition\"]}",
+     "metadata": "{}",
+     "ingestionConfig": "{}",
+     "segmentsConfig": "{\"timeColumnName\":\"created_at\",\"schemaName\":\"foo\",\"replication\":\"1\",\"replicasPerPartition\":\"1\"}",
+     "quota": "{}",
+     "query": "{}",
+     "isDimTable": "false",
+     "tableName": "foo_REALTIME"
+   },
+   "mapFields": {},
+   "listFields": {}
+ }
+ */

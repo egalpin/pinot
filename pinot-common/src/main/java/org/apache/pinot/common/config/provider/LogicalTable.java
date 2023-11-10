@@ -18,19 +18,54 @@
  */
 package org.apache.pinot.common.config.provider;
 
+import com.google.common.base.Preconditions;
+import java.util.ArrayList;
 import java.util.List;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 
 
 public class LogicalTable {
   private List<TableConfig> _offlineTables;
   private List<TableConfig> _realtimeTables;
-  private List<TableConfig> _hybridTables;
+  private List<Pair<TableConfig, TableConfig>> _hybridTables;
 
-  public LogicalTable(List<TableConfig> offlineTables, List<TableConfig> realtimeTables, List<TableConfig> hybridTables) {
+  public LogicalTable() {
+    _offlineTables = new ArrayList<>();
+    _realtimeTables = new ArrayList<>();
+    _hybridTables = new ArrayList<>();
+  }
+
+  public LogicalTable(List<TableConfig> offlineTables, List<TableConfig> realtimeTables,
+      List<Pair<TableConfig, TableConfig>> hybridTables) {
     _offlineTables = offlineTables;
     _realtimeTables = realtimeTables;
     _hybridTables = hybridTables;
+  }
+
+  public void addAll(LogicalTable other) {
+    _offlineTables.addAll(other.getOfflineTables());
+    _realtimeTables.addAll(other.getRealtimeTables());
+    _hybridTables.addAll(other.getHybridTables());
+  }
+
+  public void addOfflineTable(TableConfig tableConfig) {
+    _offlineTables.add(tableConfig);
+  }
+
+  public void addRealtimeTable(TableConfig tableConfig) {
+    _realtimeTables.add(tableConfig);
+  }
+
+  public void addHybridTable(TableConfig offlineTableConfig, TableConfig realtimeTableConfig) {
+    String rawOfflineTableName = TableNameBuilder.extractRawTableName(offlineTableConfig.getTableName());
+    String rawRealtimeTableName = TableNameBuilder.extractRawTableName(realtimeTableConfig.getTableName());
+    Preconditions.checkArgument(rawOfflineTableName.equals(rawRealtimeTableName),
+        "Raw OFFLINE table name \"%s\" does not match raw REALTIME table name \"%s\". Table cannot be hybrid.",
+        offlineTableConfig.getTableName(), realtimeTableConfig.getTableName());
+
+    _hybridTables.add(Pair.of(offlineTableConfig, realtimeTableConfig));
   }
 
   public List<TableConfig> getOfflineTables() {
@@ -41,7 +76,19 @@ public class LogicalTable {
     return _realtimeTables;
   }
 
-  public List<TableConfig> getHybridTables() {
+  public List<Pair<TableConfig, TableConfig>> getHybridTables() {
     return _hybridTables;
+  }
+
+  public void setOfflineTables(List<TableConfig> offlineTables) {
+    _offlineTables = offlineTables;
+  }
+
+  public void setRealtimeTables(List<TableConfig> realtimeTables) {
+    _realtimeTables = realtimeTables;
+  }
+
+  public void setHybridTables(List<Pair<TableConfig, TableConfig>> hybridTables) {
+    _hybridTables = hybridTables;
   }
 }
