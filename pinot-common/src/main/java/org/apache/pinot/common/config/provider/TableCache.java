@@ -403,6 +403,18 @@ public class TableCache implements PinotConfigProvider {
     return tableConfigs;
   }
 
+  public LogicalTable getLogicalTable(String rawLogicalTableName) {
+    String offlineTableNameToCheck = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
+    if (_routingManager.routingExists(offlineTableNameToCheck)) {
+      offlineTableName = offlineTableNameToCheck;
+    }
+    String realtimeTableNameToCheck = TableNameBuilder.REALTIME.tableNameWithType(tableName);
+    if (_routingManager.routingExists(realtimeTableNameToCheck)) {
+      realtimeTableName = realtimeTableNameToCheck;
+    }
+
+  }
+
   private void notifySchemaChangeListeners() {
     if (!_schemaChangeListeners.isEmpty()) {
       List<Schema> schemas = getSchemas();

@@ -53,6 +53,7 @@ import org.apache.pinot.broker.broker.AccessControlFactory;
 import org.apache.pinot.broker.querylog.QueryLogger;
 import org.apache.pinot.broker.queryquota.QueryQuotaManager;
 import org.apache.pinot.broker.routing.BrokerRoutingManager;
+import org.apache.pinot.common.config.provider.LogicalTable;
 import org.apache.pinot.common.config.provider.TableCache;
 import org.apache.pinot.common.exception.QueryException;
 import org.apache.pinot.common.http.MultiHttpRequest;
@@ -453,6 +454,7 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
       // Get the tables hit by the request
       String offlineTableName = null;
       String realtimeTableName = null;
+      String logicalTableName = null;
       TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
       if (tableType == TableType.OFFLINE) {
         // Offline table
@@ -465,7 +467,11 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
           realtimeTableName = tableName;
         }
       } else {
+        // Logical table handling
+        // expand logical table
         // Hybrid table (check both OFFLINE and REALTIME)
+        logicalTableName = rawTableName;
+        LogicalTable logicalTable = _tableCache.getLogicalTable(logicalTableName);
         String offlineTableNameToCheck = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
         if (_routingManager.routingExists(offlineTableNameToCheck)) {
           offlineTableName = offlineTableNameToCheck;
@@ -501,7 +507,7 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
       if (realtimeTableName == null) {
         realtimeTableConfig = null;
       }
-      HandlerContext handlerContext = getHandlerContext(offlineTableConfig, realtimeTableConfig);
+      HandlerContext handlerContext = getHandlerContext(List.of(offlineTableConfig, realtimeTableConfig));
       if (handlerContext._disableGroovy) {
         rejectGroovyQuery(serverPinotQuery);
       }
@@ -1224,39 +1230,30 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
     }
   }
 
-  private HandlerContext getHandlerContext(@Nullable TableConfig offlineTableConfig,
-      @Nullable TableConfig realtimeTableConfig) {
+  private HandlerContext getHandlerContext(List<TableConfig> tableConfigs) {
     Boolean disableGroovyOverride = null;
     Boolean useApproximateFunctionOverride = null;
-    if (offlineTableConfig != null && offlineTableConfig.getQueryConfig() != null) {
-      QueryConfig offlineTableQueryConfig = offlineTableConfig.getQueryConfig();
-      Boolean disableGroovyOfflineTableOverride = offlineTableQueryConfig.getDisableGroovy();
-      if (disableGroovyOfflineTableOverride != null) {
-        disableGroovyOverride = disableGroovyOfflineTableOverride;
-      }
-      Boolean useApproximateFunctionOfflineTableOverride = offlineTableQueryConfig.getUseApproximateFunction();
-      if (useApproximateFunctionOfflineTableOverride != null) {
-        useApproximateFunctionOverride = useApproximateFunctionOfflineTableOverride;
-      }
-    }
-    if (realtimeTableConfig != null && realtimeTableConfig.getQueryConfig() != null) {
-      QueryConfig realtimeTableQueryConfig = realtimeTableConfig.getQueryConfig();
-      Boolean disableGroovyRealtimeTableOverride = realtimeTableQueryConfig.getDisableGroovy();
-      if (disableGroovyRealtimeTableOverride != null) {
-        if (disableGroovyOverride == null) {
-          disableGroovyOverride = disableGroovyRealtimeTableOverride;
-        } else {
-          // Disable Groovy if either offline or realtime table config disables Groovy
-          disableGroovyOverride |= disableGroovyRealtimeTableOverride;
+
+    for (TableConfig tableConfig : tableConfigs) {
+      if (tableConfig != null && tableConfig.getQueryConfig() != null) {
+        QueryConfig realtimeTableQueryConfig = tableConfig.getQueryConfig();
+        Boolean disableGroovyRealtimeTableOverride = realtimeTableQueryConfig.getDisableGroovy();
+        if (disableGroovyRealtimeTableOverride != null) {
+          if (disableGroovyOverride == null) {
+            disableGroovyOverride = disableGroovyRealtimeTableOverride;
+          } else {
+            // Disable Groovy if any table config disables Groovy
+            disableGroovyOverride |= disableGroovyRealtimeTableOverride;
+          }
         }
-      }
-      Boolean useApproximateFunctionRealtimeTableOverride = realtimeTableQueryConfig.getUseApproximateFunction();
-      if (useApproximateFunctionRealtimeTableOverride != null) {
-        if (useApproximateFunctionOverride == null) {
-          useApproximateFunctionOverride = useApproximateFunctionRealtimeTableOverride;
-        } else {
-          // Use approximate function if both offline and realtime table config uses approximate function
-          useApproximateFunctionOverride &= useApproximateFunctionRealtimeTableOverride;
+        Boolean useApproximateFunctionRealtimeTableOverride = realtimeTableQueryConfig.getUseApproximateFunction();
+        if (useApproximateFunctionRealtimeTableOverride != null) {
+          if (useApproximateFunctionOverride == null) {
+            useApproximateFunctionOverride = useApproximateFunctionRealtimeTableOverride;
+          } else {
+            // Use approximate function if any table config uses approximate function
+            useApproximateFunctionOverride &= useApproximateFunctionRealtimeTableOverride;
+          }
         }
       }
     }

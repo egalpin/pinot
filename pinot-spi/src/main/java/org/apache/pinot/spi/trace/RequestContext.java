@@ -222,6 +222,6 @@ public interface RequestContext {
   void setRequestHttpHeaders(Map<String, List<String>> requestHttpHeaders);
 
   enum FanoutType {
-    OFFLINE, REALTIME, HYBRID
+    OFFLINE, REALTIME, HYBRID, LOGICAL
   }
 }
