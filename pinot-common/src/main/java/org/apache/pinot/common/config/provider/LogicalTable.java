@@ -21,24 +21,28 @@ package org.apache.pinot.common.config.provider;
 import com.google.common.base.Preconditions;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 
 
 public class LogicalTable {
+  private String _tableNameWithType;
   private List<TableConfig> _offlineTables;
   private List<TableConfig> _realtimeTables;
   private List<Pair<TableConfig, TableConfig>> _hybridTables;
 
-  public LogicalTable() {
+  public LogicalTable(String tableNameWithType) {
+    _tableNameWithType = tableNameWithType;
     _offlineTables = new ArrayList<>();
     _realtimeTables = new ArrayList<>();
     _hybridTables = new ArrayList<>();
   }
 
-  public LogicalTable(List<TableConfig> offlineTables, List<TableConfig> realtimeTables,
+  public LogicalTable(String tableNameWithType, List<TableConfig> offlineTables, List<TableConfig> realtimeTables,
       List<Pair<TableConfig, TableConfig>> hybridTables) {
+    _tableNameWithType = tableNameWithType;
     _offlineTables = offlineTables;
     _realtimeTables = realtimeTables;
     _hybridTables = hybridTables;
@@ -68,6 +72,14 @@ public class LogicalTable {
     _hybridTables.add(Pair.of(offlineTableConfig, realtimeTableConfig));
   }
 
+  public String getTableNameWithType() {
+    return _tableNameWithType;
+  }
+
+  public String getRawTableName() {
+    return TableNameBuilder.extractRawTableName(_tableNameWithType);
+  }
+
   public List<TableConfig> getOfflineTables() {
     return _offlineTables;
   }
@@ -78,6 +90,15 @@ public class LogicalTable {
 
   public List<Pair<TableConfig, TableConfig>> getHybridTables() {
     return _hybridTables;
+  }
+
+  public List<TableConfig> getAllTables() {
+    List<TableConfig> allTables = new ArrayList<>(_offlineTables);
+    allTables.addAll(_realtimeTables);
+    allTables.addAll(_hybridTables.stream().map(Pair::getRight).collect(Collectors.toList()));
+    allTables.addAll(_hybridTables.stream().map(Pair::getLeft).collect(Collectors.toList()));
+
+    return allTables;
   }
 
   public void setOfflineTables(List<TableConfig> offlineTables) {
