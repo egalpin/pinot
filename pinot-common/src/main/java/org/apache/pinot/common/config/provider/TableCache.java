@@ -88,7 +88,8 @@ public class TableCache implements PinotConfigProvider {
   // Key is lower case table name (with or without type suffix), value is actual table name
   // For case-insensitive mode only
   private final Map<String, String> _tableNameMap = new ConcurrentHashMap<>();
-  private final Map<String, List<String>> _logicalTableNameMap = new ConcurrentHashMap<>();
+  private final Map<String, List<String>> _logicalTableAssociationMap = new ConcurrentHashMap<>();
+  private final Map<String, LogicalTable> _logicalTableMap = new ConcurrentHashMap<>();
 
   private final ZkSchemaChangeListener _zkSchemaChangeListener = new ZkSchemaChangeListener();
   // Key is schema name, value is schema info
@@ -252,6 +253,7 @@ public class TableCache implements PinotConfigProvider {
     for (ZNRecord znRecord : znRecords) {
       if (znRecord != null) {
         try {
+          // TODO: putLogicalTableConfig?
           putTableConfig(znRecord);
         } catch (Exception e) {
           LOGGER.error("Caught exception while adding table config for ZNRecord: {}", znRecord.getId(), e);
@@ -260,36 +262,37 @@ public class TableCache implements PinotConfigProvider {
     }
   }
 
-  private void putTableConfig(ZNRecord znRecord)
+  private void putLogicalTableConfig(ZNRecord znRecord)
       throws IOException {
-    // TODO(egalpin): put this somewhere better
-    boolean isLogicalTable =
-        TableType.valueOf(znRecord.getSimpleField(TableConfig.TABLE_TYPE_KEY)) == TableType.LOGICAL;
-
+    // TODO: put the actual LogicalTable objects in the map?
     String tableNameWithType = znRecord.getSimpleField(TableConfig.TABLE_NAME_KEY);
     String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
-    if (isLogicalTable) {
-      List<String> associatedTables = znRecord.getListField(TableConfig.ASSOCIATED_TABLES);
-      if (_ignoreCase) {
-        _logicalTableNameMap.put(tableNameWithType.toLowerCase(), associatedTables);
-        _logicalTableNameMap.put(rawTableName.toLowerCase(), associatedTables);
-      } else {
-        _logicalTableNameMap.put(tableNameWithType, associatedTables);
-        _logicalTableNameMap.put(rawTableName, associatedTables);
-      }
-    } else {
-      TableConfig tableConfig = TableConfigUtils.fromZNRecord(znRecord);
-      tableNameWithType = tableConfig.getTableName();
-      rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
-      _tableConfigInfoMap.put(tableNameWithType, new TableConfigInfo(tableConfig));
+    List<String> associatedTables = znRecord.getListField(TableConfig.ASSOCIATED_TABLES);
 
-      String schemaName = tableConfig.getValidationConfig().getSchemaName();
-      if (schemaName != null && !schemaName.equals(rawTableName)) {
-        _schemaNameMap.put(tableNameWithType, schemaName);
-        _schemaNameMap.put(rawTableName, schemaName);
-      } else {
-        removeSchemaName(tableNameWithType);
-      }
+    if (_ignoreCase) {
+      _logicalTableAssociationMap.put(tableNameWithType.toLowerCase(), associatedTables);
+      _logicalTableAssociationMap.put(rawTableName.toLowerCase(), associatedTables);
+    } else {
+      _logicalTableAssociationMap.put(tableNameWithType, associatedTables);
+      _logicalTableAssociationMap.put(rawTableName, associatedTables);
+    }
+
+    initializeLogicalTables();
+  }
+
+  private void putTableConfig(ZNRecord znRecord)
+      throws IOException {
+    String tableNameWithType = znRecord.getSimpleField(TableConfig.TABLE_NAME_KEY);
+    String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
+    TableConfig tableConfig = TableConfigUtils.fromZNRecord(znRecord);
+    _tableConfigInfoMap.put(tableNameWithType, new TableConfigInfo(tableConfig));
+
+    String schemaName = tableConfig.getValidationConfig().getSchemaName();
+    if (schemaName != null && !schemaName.equals(rawTableName)) {
+      _schemaNameMap.put(tableNameWithType, schemaName);
+      _schemaNameMap.put(rawTableName, schemaName);
+    } else {
+      removeSchemaName(tableNameWithType);
     }
 
     if (_ignoreCase) {
@@ -422,14 +425,24 @@ public class TableCache implements PinotConfigProvider {
     return tableConfigs;
   }
 
-  // Note: this should be executed at query time in case the associated tables themselves have changed ex. if one
-  // logical table is associated with another logical table
-  public LogicalTable explodeLogicalTable(String tableName) {
-    LogicalTable logicalTable = new LogicalTable();
-    List<String> associatedTables = _logicalTableNameMap.get(tableName);
-    if (associatedTables == null) {
-      return new LogicalTable();
+  private void initializeLogicalTables() {
+    for (Map.Entry<String, List<String>> logicalTableEntry: _logicalTableAssociationMap.entrySet() ) {
+      LogicalTable logicalTable = expandLogicalTable(logicalTableEntry.getKey(), logicalTableEntry.getValue());
+      _logicalTableMap.put(logicalTableEntry.getKey(), logicalTable);
     }
+  }
+
+  @Nullable
+  public LogicalTable getLogicalTable(String tableName) {
+    return _logicalTableMap.getOrDefault(tableName, null);
+  }
+
+  // Note: this should be executed at query time in case the associated tables themselves have changed ex. if one
+  // logical table is associated with another logical table. Alternatively, all logical tables could be recomputed
+  // whenever any LogicalTable is modified
+  private LogicalTable expandLogicalTable(@Nullable String tableName, List<String> associatedTables) {
+    // TODO: guard against circular reference where 2 logical tables could reference each other
+    LogicalTable logicalTable = new LogicalTable(tableName);
 
     // For each associated table, recursively expand it in case the associated table is a Logical table
     TableConfigInfo offlineConfigInfo;
@@ -442,7 +455,10 @@ public class TableCache implements PinotConfigProvider {
         realtimeConfigInfo = _tableConfigInfoMap.get(TableNameBuilder.OFFLINE.tableNameWithType(assocTable));
         logicalTable.addHybridTable(offlineConfigInfo._tableConfig, realtimeConfigInfo._tableConfig);
       } else if (tableType == TableType.LOGICAL) {
-        logicalTable.addAll(explodeLogicalTable(assocTable));
+        LogicalTable nestedLogicalTable = getLogicalTable(assocTable);
+        if (nestedLogicalTable != null) {
+          logicalTable.addAll(nestedLogicalTable);
+        }
       } else if (tableType == TableType.REALTIME) {
         realtimeConfigInfo = _tableConfigInfoMap.get(TableNameBuilder.REALTIME.tableNameWithType(assocTable));
         logicalTable.addRealtimeTable(realtimeConfigInfo._tableConfig);
@@ -451,7 +467,6 @@ public class TableCache implements PinotConfigProvider {
         logicalTable.addRealtimeTable(offlineConfigInfo._tableConfig);
       }
     }
-
     return logicalTable;
   }
 
@@ -498,6 +513,7 @@ public class TableCache implements PinotConfigProvider {
       if (data != null) {
         ZNRecord znRecord = (ZNRecord) data;
         try {
+          // TODO: putLogicalTableConfig?
           putTableConfig(znRecord);
         } catch (Exception e) {
           LOGGER.error("Caught exception while refreshing table config for ZNRecord: {}", znRecord.getId(), e);

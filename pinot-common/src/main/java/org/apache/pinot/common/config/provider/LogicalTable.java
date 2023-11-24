@@ -22,26 +22,37 @@ import com.google.common.base.Preconditions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
+import javax.annotation.Nullable;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 
 
 public class LogicalTable {
-  private String _tableNameWithType;
+  private String _tableNameWithType = null;
   private List<TableConfig> _offlineTables;
   private List<TableConfig> _realtimeTables;
-  private List<Pair<TableConfig, TableConfig>> _hybridTables;
+  private List<HybridTableConfig> _hybridTables;
 
-  public LogicalTable(String tableNameWithType) {
+  public LogicalTable() {
+    this(null);
+  }
+
+  public LogicalTable(@Nullable String tableNameWithType) {
     _tableNameWithType = tableNameWithType;
     _offlineTables = new ArrayList<>();
     _realtimeTables = new ArrayList<>();
     _hybridTables = new ArrayList<>();
   }
 
-  public LogicalTable(String tableNameWithType, List<TableConfig> offlineTables, List<TableConfig> realtimeTables,
-      List<Pair<TableConfig, TableConfig>> hybridTables) {
+  public LogicalTable(List<TableConfig> offlineTables, List<TableConfig> realtimeTables,
+      List<HybridTableConfig> hybridTables) {
+    this(null, offlineTables, realtimeTables, hybridTables);
+  }
+
+  public LogicalTable(@Nullable String tableNameWithType, List<TableConfig> offlineTables, List<TableConfig> realtimeTables,
+      List<HybridTableConfig> hybridTables) {
     _tableNameWithType = tableNameWithType;
     _offlineTables = offlineTables;
     _realtimeTables = realtimeTables;
@@ -69,9 +80,10 @@ public class LogicalTable {
         "Raw OFFLINE table name \"%s\" does not match raw REALTIME table name \"%s\". Table cannot be hybrid.",
         offlineTableConfig.getTableName(), realtimeTableConfig.getTableName());
 
-    _hybridTables.add(Pair.of(offlineTableConfig, realtimeTableConfig));
+    _hybridTables.add(new HybridTableConfig(offlineTableConfig, realtimeTableConfig));
   }
 
+  @Nullable
   public String getTableNameWithType() {
     return _tableNameWithType;
   }
@@ -88,15 +100,15 @@ public class LogicalTable {
     return _realtimeTables;
   }
 
-  public List<Pair<TableConfig, TableConfig>> getHybridTables() {
+  public List<HybridTableConfig> getHybridTables() {
     return _hybridTables;
   }
 
   public List<TableConfig> getAllTables() {
     List<TableConfig> allTables = new ArrayList<>(_offlineTables);
     allTables.addAll(_realtimeTables);
-    allTables.addAll(_hybridTables.stream().map(Pair::getRight).collect(Collectors.toList()));
-    allTables.addAll(_hybridTables.stream().map(Pair::getLeft).collect(Collectors.toList()));
+    allTables.addAll(_hybridTables.stream().map(HybridTableConfig::getOfflineTableConfig).collect(Collectors.toList()));
+    allTables.addAll(_hybridTables.stream().map(HybridTableConfig::getRealtimeTableConfig).collect(Collectors.toList()));
 
     return allTables;
   }
@@ -109,7 +121,29 @@ public class LogicalTable {
     _realtimeTables = realtimeTables;
   }
 
-  public void setHybridTables(List<Pair<TableConfig, TableConfig>> hybridTables) {
+  public void setHybridTables(List<HybridTableConfig> hybridTables) {
     _hybridTables = hybridTables;
+  }
+
+  public static class HybridTableConfig {
+    private final TableConfig _realtimeTableConfig;
+    private final TableConfig _offlineTableConfig;
+
+    public HybridTableConfig(TableConfig offlineTableConfig, TableConfig realtimeTableConfig) {
+      // Verify the params because it would be easy to accidentally reverse them
+      Preconditions.checkArgument(TableNameBuilder.getTableTypeFromTableName(offlineTableConfig.getTableName()) == TableType.OFFLINE);
+      Preconditions.checkArgument(TableNameBuilder.getTableTypeFromTableName(offlineTableConfig.getTableName()) == TableType.REALTIME);
+
+      _realtimeTableConfig = realtimeTableConfig;
+      _offlineTableConfig = offlineTableConfig;
+    }
+
+    public TableConfig getOfflineTableConfig() {
+      return _offlineTableConfig;
+    }
+
+    public TableConfig getRealtimeTableConfig() {
+      return _realtimeTableConfig;
+    }
   }
 }

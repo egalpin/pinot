@@ -451,10 +451,14 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
         throw new WebApplicationException("Permission denied", Response.Status.FORBIDDEN);
       }
 
-      // Get the tables hit by the request
+      // Get the tables hit by the request. Check logical tables first.
+      LogicalTable logicalTable = _tableCache.getLogicalTable(rawTableName);
+      if (logicalTable != null) {
+        return processLogicalTableRequest();
+      }
+
       String offlineTableName = null;
       String realtimeTableName = null;
-      LogicalTable logicalTable;
       TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
       if (tableType == TableType.OFFLINE) {
         // Offline table
@@ -466,26 +470,16 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
         if (_routingManager.routingExists(tableName)) {
           realtimeTableName = tableName;
         }
-      } else if (tableType == TableType.LOGICAL) {
-        logicalTable = _tableCache.explodeLogicalTable(rawTableName);
-        return processLogicalTableRequest();
       } else {
-        // Logical table handling
-        // expand logical table
         // Hybrid table (check both OFFLINE and REALTIME)
-        logicalTable = _tableCache.explodeLogicalTable(rawTableName);
-        if (logicalTable == null) {
-          // hybrid table
-          String offlineTableNameToCheck = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
-          if (_routingManager.routingExists(offlineTableNameToCheck)) {
-            offlineTableName = offlineTableNameToCheck;
-          }
-          String realtimeTableNameToCheck = TableNameBuilder.REALTIME.tableNameWithType(tableName);
-          if (_routingManager.routingExists(realtimeTableNameToCheck)) {
-            realtimeTableName = realtimeTableNameToCheck;
-          }
-        } else {
-          return processLogicalTableRequest();
+        // hybrid table
+        String offlineTableNameToCheck = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
+        if (_routingManager.routingExists(offlineTableNameToCheck)) {
+          offlineTableName = offlineTableNameToCheck;
+        }
+        String realtimeTableNameToCheck = TableNameBuilder.REALTIME.tableNameWithType(tableName);
+        if (_routingManager.routingExists(realtimeTableNameToCheck)) {
+          realtimeTableName = realtimeTableNameToCheck;
         }
       }
 
@@ -833,8 +827,9 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
   }
 
   private BrokerResponseNative processLogicalTableRequest(LogicalTable logicalTable, RequestContext requestContext,
-      long requestId, String query, PinotQuery serverPinotQuery, BrokerRequest serverBrokerRequest) {
+      long requestId, String query, PinotQuery pinotQuery, BrokerRequest serverBrokerRequest, @Nullable RequesterIdentity requesterIdentity) {
 
+    PinotQuery serverPinotQuery = GapfillUtils.stripGapfill(pinotQuery);
     if (logicalTable == null) {
       LOGGER.info("Table not found for request {}: {}", requestId, query);
       requestContext.setErrorCode(QueryException.TABLE_DOES_NOT_EXIST_ERROR_CODE);
@@ -843,9 +838,10 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
 
     boolean canRouteQuery = false;
 
+//    String tenant =
     for (TableConfig tableConfig : logicalTable.getAllTables()) {
 
-     String tableName = tableConfig.getTableName();
+      String tableName = tableConfig.getTableName();
      String rawTableName = TableNameBuilder.extractRawTableName(tableName);
      canRouteQuery |= _routingManager.routingExists(tableName);
 
@@ -859,6 +855,12 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
         return new BrokerResponseNative(QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
       }
     }
+
+    // TODO: Assert that all physical tables have the same tenant?
+//    requestContext.setFanoutType(RequestContext.FanoutType.LOGICAL);
+//    requestContext.setOfflineServerTenant(getServerTenant(offlineTableName));
+//    requestContext.setRealtimeServerTenant(getServerTenant(realtimeTableName));
+
 
     if (!canRouteQuery) {
       // No table matches the request
@@ -883,71 +885,113 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
     } catch (Exception e) {
       LOGGER.info("Caught exception while validating request {}: {}, {}", requestId, query, e.getMessage());
       requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-      _brokerMetrics.addMeteredTableValue(logicalTable.getRawTableName(), BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
+      _brokerMetrics.addMeteredTableValue(logicalTable.getTableNameWithType(), BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
       return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
     }
 
-    _brokerMetrics.addMeteredTableValue(logicalTable.getRawTableName(), BrokerMeter.QUERIES, 1);
-    _brokerMetrics.addValueToTableGauge(logicalTable.getRawTableName(), BrokerGauge.REQUEST_SIZE, query.length());
+    _brokerMetrics.addMeteredTableValue(logicalTable.getTableNameWithType(), BrokerMeter.QUERIES, 1);
+    _brokerMetrics.addValueToTableGauge(logicalTable.getTableNameWithType(), BrokerGauge.REQUEST_SIZE, query.length());
 
     // Prepare OFFLINE and REALTIME requests
     setTableName(serverBrokerRequest, logicalTable.getTableNameWithType());
-    BrokerRequest offlineBrokerRequest = null;
-    BrokerRequest realtimeBrokerRequest = null;
+    List<BrokerRequest> offlineBrokerRequests = new ArrayList<>();
+    List<BrokerRequest> realtimeBrokerRequests = new ArrayList<>();
+    // TODO: impl method for min of all timeboundary info across offline tables
     TimeBoundaryInfo timeBoundaryInfo = null;
 
     for (TableConfig tableConfig : logicalTable.getOfflineTables()) {
       // OFFLINE only
-      handleExpressionOverride(serverPinotQuery, _tableCache.getExpressionOverrideMap(offlineTableName));
+      handleExpressionOverride(serverPinotQuery, _tableCache.getExpressionOverrideMap(tableConfig.getTableName()));
       handleTimestampIndexOverride(serverPinotQuery, tableConfig);
       _queryOptimizer.optimize(serverPinotQuery, tableConfig,
           _tableCache.getSchema(TableNameBuilder.extractRawTableName(tableConfig.getTableName())));
-      offlineBrokerRequest = serverBrokerRequest;
-
-      requestContext.setFanoutType(RequestContext.FanoutType.OFFLINE);
-      requestContext.setOfflineServerTenant(getServerTenant(tableConfig.getTableName()));
+      if (isFilterAlwaysTrue(serverBrokerRequest.getPinotQuery())) {
+        // Drop offline request filter since it is always true
+        serverBrokerRequest.getPinotQuery().setFilterExpression(null);
+      }
+      offlineBrokerRequests.add(serverBrokerRequest);
     }
 
     for (TableConfig tableConfig : logicalTable.getRealtimeTables()) {
       // REALTIME only
-      handleExpressionOverride(serverPinotQuery, _tableCache.getExpressionOverrideMap(realtimeTableName));
+      handleExpressionOverride(serverPinotQuery, _tableCache.getExpressionOverrideMap(tableConfig.getTableName()));
       handleTimestampIndexOverride(serverPinotQuery, tableConfig);
       _queryOptimizer.optimize(serverPinotQuery, tableConfig,
           _tableCache.getSchema(TableNameBuilder.extractRawTableName(tableConfig.getTableName())));
-      realtimeBrokerRequest = serverBrokerRequest;
-
-      requestContext.setFanoutType(RequestContext.FanoutType.REALTIME);
-      requestContext.setRealtimeServerTenant(getServerTenant(tableConfig.getTableName()));
+      if (isFilterAlwaysTrue(serverBrokerRequest.getPinotQuery())) {
+        // Drop offline request filter since it is always true
+        serverBrokerRequest.getPinotQuery().setFilterExpression(null);
+      }
+      realtimeBrokerRequests.add(serverBrokerRequest);
     }
 
-    for (Pair<TableConfig, TableConfig> hybridConfig : logicalTable.getHybridTables()) {
+    Schema schema;
+    for (LogicalTable.HybridTableConfig hybridConfig : logicalTable.getHybridTables()) {
       // Time boundary info might be null when there is no segment in the offline table, query real-time side only
+      String offlineTableName = hybridConfig.getOfflineTableConfig().getTableName();
+      String realtimeTableName = hybridConfig.getRealtimeTableConfig().getTableName();
       timeBoundaryInfo = _routingManager.getTimeBoundaryInfo(offlineTableName);
       if (timeBoundaryInfo == null) {
-        LOGGER.debug("No time boundary info found for hybrid table: {}", rawTableName);
+        LOGGER.debug("No time boundary info found for hybrid table: {}", offlineTableName);
         offlineTableName = null;
       }
       // Hybrid
       PinotQuery offlinePinotQuery = serverPinotQuery.deepCopy();
       offlinePinotQuery.getDataSource().setTableName(offlineTableName);
-      attachTimeBoundary(offlinePinotQuery, timeBoundaryInfo, true);
+      if (timeBoundaryInfo != null) {
+        attachTimeBoundary(offlinePinotQuery, timeBoundaryInfo, true);
+      }
       handleExpressionOverride(offlinePinotQuery, _tableCache.getExpressionOverrideMap(offlineTableName));
-      handleTimestampIndexOverride(offlinePinotQuery, offlineTableConfig);
-      _queryOptimizer.optimize(offlinePinotQuery, offlineTableConfig, schema);
-      offlineBrokerRequest = CalciteSqlCompiler.convertToBrokerRequest(offlinePinotQuery);
+      handleTimestampIndexOverride(offlinePinotQuery, hybridConfig.getOfflineTableConfig());
+      schema = _tableCache.getSchema(offlineTableName);
+      _queryOptimizer.optimize(offlinePinotQuery, hybridConfig.getOfflineTableConfig(), schema);
+      BrokerRequest offlineReq = CalciteSqlCompiler.convertToBrokerRequest(offlinePinotQuery);
+      if (isFilterAlwaysTrue(offlineReq.getPinotQuery())) {
+        // Drop offline request filter since it is always true
+        offlineReq.getPinotQuery().setFilterExpression(null);
+      }
+      offlineBrokerRequests.add(offlineReq);
 
       PinotQuery realtimePinotQuery = serverPinotQuery.deepCopy();
       realtimePinotQuery.getDataSource().setTableName(realtimeTableName);
-      attachTimeBoundary(realtimePinotQuery, timeBoundaryInfo, false);
+      if (timeBoundaryInfo != null) {
+        attachTimeBoundary(realtimePinotQuery, timeBoundaryInfo, false);
+      }
       handleExpressionOverride(realtimePinotQuery, _tableCache.getExpressionOverrideMap(realtimeTableName));
-      handleTimestampIndexOverride(realtimePinotQuery, realtimeTableConfig);
-      _queryOptimizer.optimize(realtimePinotQuery, realtimeTableConfig, schema);
-      realtimeBrokerRequest = CalciteSqlCompiler.convertToBrokerRequest(realtimePinotQuery);
-
-      requestContext.setFanoutType(RequestContext.FanoutType.HYBRID);
-      requestContext.setOfflineServerTenant(getServerTenant(offlineTableName));
-      requestContext.setRealtimeServerTenant(getServerTenant(realtimeTableName));
+      handleTimestampIndexOverride(realtimePinotQuery, hybridConfig.getRealtimeTableConfig());
+      schema = _tableCache.getSchema(realtimeTableName);
+      _queryOptimizer.optimize(realtimePinotQuery, hybridConfig.getRealtimeTableConfig(), schema);
+      BrokerRequest realtimeReq = CalciteSqlCompiler.convertToBrokerRequest(realtimePinotQuery);
+      if (isFilterAlwaysTrue(realtimeReq.getPinotQuery())) {
+        // Drop offline request filter since it is always true
+        realtimeReq.getPinotQuery().setFilterExpression(null);
+      }
+      realtimeBrokerRequests.add(offlineReq);
     }
+
+    // Check if response can be sent without server query evaluation.
+    if (offlineBrokerRequests.isEmpty() && isFilterAlwaysFalse(offlineBrokerRequests)) {
+      // We don't need to evaluate offline request
+      offlineBrokerRequests = null;
+    }
+    if (realtimeBrokerRequests.isEmpty() && isFilterAlwaysFalse(realtimeBrokerRequests)) {
+      // We don't need to evaluate realtime request
+      realtimeBrokerRequests = null;
+    }
+
+    if (offlineBrokerRequests.isEmpty() && realtimeBrokerRequests.isEmpty()) {
+      return getEmptyBrokerOnlyResponse(requestId, query, requesterIdentity, requestContext, pinotQuery, logicalTable.getTableNameWithType());
+    }
+
+    // handled in above loops
+//    if (offlineBrokerRequests != null && isFilterAlwaysTrue(offlineBrokerRequests.getPinotQuery())) {
+//      // Drop offline request filter since it is always true
+//      offlineBrokerRequests.getPinotQuery().setFilterExpression(null);
+//    }
+//    if (realtimeBrokerRequests != null && isFilterAlwaysTrue(realtimeBrokerRequests.getPinotQuery())) {
+//      // Drop realtime request filter since it is always true
+//      realtimeBrokerRequests.getPinotQuery().setFilterExpression(null);
+//    }
   }
 
   private BrokerResponseNative getEmptyBrokerOnlyResponse(long requestId, String query,
@@ -1023,6 +1067,16 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
   /** Given a {@link PinotQuery}, check if the WHERE clause will always evaluate to false. */
   private boolean isFilterAlwaysFalse(PinotQuery pinotQuery) {
     return FALSE.equals(pinotQuery.getFilterExpression());
+  }
+
+  private boolean isFilterAlwaysFalse(List<BrokerRequest> brokerRequests) {
+    for (BrokerRequest req : brokerRequests) {
+      if (!isFilterAlwaysFalse(req.getPinotQuery())) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   /** Given a {@link PinotQuery}, check if the WHERE clause will always evaluate to true. */
