@@ -26,6 +26,7 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -691,22 +692,10 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
 
       // Set timeout in the requests
       long timeSpentMs = TimeUnit.NANOSECONDS.toMillis(routingEndTimeNs - compilationStartTimeNs);
-      // Remaining time in milliseconds for the server query execution
-      // NOTE: For hybrid use case, in most cases offline table and real-time table should have the same query timeout
-      //       configured, but if necessary, we also allow different timeout for them.
-      //       If the timeout is not the same for offline table and real-time table, use the max of offline table
-      //       remaining time and realtime table remaining time. Server side will have different remaining time set for
-      //       each table type, and broker should wait for both types to return.
+
       long remainingTimeMs = 0;
       try {
-        if (offlineBrokerRequest != null) {
-          remainingTimeMs =
-              setQueryTimeout(offlineTableName, offlineBrokerRequest.getPinotQuery().getQueryOptions(), timeSpentMs);
-        }
-        if (realtimeBrokerRequest != null) {
-          remainingTimeMs = Math.max(remainingTimeMs,
-              setQueryTimeout(realtimeTableName, realtimeBrokerRequest.getPinotQuery().getQueryOptions(), timeSpentMs));
-        }
+        remainingTimeMs = getRemainingTimeMs(timeSpentMs, realtimeBrokerRequest, offlineBrokerRequest);
       } catch (TimeoutException e) {
         String errorMessage = e.getMessage();
         LOGGER.info("{} {}: {}", errorMessage, requestId, query);
@@ -826,6 +815,31 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
     }
   }
 
+  private long getRemainingTimeMs(long timeSpentMs, BrokerRequest realtimeBrokerRequest,
+      BrokerRequest offlineBrokerRequest)
+      throws TimeoutException {
+    // Remaining time in milliseconds for the server query execution
+    // NOTE: For hybrid use case, in most cases offline table and real-time table should have the same query timeout
+    //       configured, but if necessary, we also allow different timeout for them.
+    //       If the timeout is not the same for offline table and real-time table, use the max of offline table
+    //       remaining time and realtime table remaining time. Server side will have different remaining time set for
+    //       each table type, and broker should wait for both types to return.
+    long remainingTimeMs = 0;
+
+    if (offlineBrokerRequest != null) {
+      String offlineTableName = offlineBrokerRequest.getPinotQuery().getDataSource().getTableName();
+      remainingTimeMs =
+          setQueryTimeout(offlineTableName, offlineBrokerRequest.getPinotQuery().getQueryOptions(), timeSpentMs);
+    }
+    if (realtimeBrokerRequest != null) {
+      String realtimeTableName = realtimeBrokerRequest.getPinotQuery().getDataSource().getTableName();
+      remainingTimeMs = Math.max(remainingTimeMs,
+          setQueryTimeout(realtimeTableName, realtimeBrokerRequest.getPinotQuery().getQueryOptions(), timeSpentMs));
+    }
+
+    return remainingTimeMs;
+  }
+
   private BrokerResponseNative processLogicalTableRequest(LogicalTable logicalTable, RequestContext requestContext,
       long requestId, String query, PinotQuery pinotQuery, BrokerRequest serverBrokerRequest, @Nullable RequesterIdentity requesterIdentity) {
 
@@ -841,7 +855,7 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
 //    String tenant =
     for (TableConfig tableConfig : logicalTable.getAllTables()) {
 
-      String tableName = tableConfig.getTableName();
+     String tableName = tableConfig.getTableName();
      String rawTableName = TableNameBuilder.extractRawTableName(tableName);
      canRouteQuery |= _routingManager.routingExists(tableName);
 
@@ -966,17 +980,17 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
         // Drop offline request filter since it is always true
         realtimeReq.getPinotQuery().setFilterExpression(null);
       }
-      realtimeBrokerRequests.add(offlineReq);
+      realtimeBrokerRequests.add(realtimeReq);
     }
 
     // Check if response can be sent without server query evaluation.
     if (offlineBrokerRequests.isEmpty() && isFilterAlwaysFalse(offlineBrokerRequests)) {
       // We don't need to evaluate offline request
-      offlineBrokerRequests = null;
+      offlineBrokerRequests = Collections.emptyList();
     }
     if (realtimeBrokerRequests.isEmpty() && isFilterAlwaysFalse(realtimeBrokerRequests)) {
       // We don't need to evaluate realtime request
-      realtimeBrokerRequests = null;
+      realtimeBrokerRequests = Collections.emptyList();
     }
 
     if (offlineBrokerRequests.isEmpty() && realtimeBrokerRequests.isEmpty()) {
@@ -992,6 +1006,95 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
 //      // Drop realtime request filter since it is always true
 //      realtimeBrokerRequests.getPinotQuery().setFilterExpression(null);
 //    }
+    // Calculate routing table for the query
+    // TODO: Modify RoutingManager interface to directly take PinotQuery
+    long routingStartTimeNs = System.nanoTime();
+    Map<ServerInstance, List<String>> offlineRoutingTable = new HashMap<>();
+    Map<ServerInstance, List<String>> realtimeRoutingTable = new HashMap<>();
+    List<String> unavailableSegments = new ArrayList<>();
+    int numPrunedSegmentsTotal = 0;
+    if (!offlineBrokerRequests.isEmpty()) {
+      for (BrokerRequest offlineReq : offlineBrokerRequests) {
+        // NOTE: Routing table might be null if table is just removed
+        RoutingTable routingTable = _routingManager.getRoutingTable(offlineReq, requestId);
+        if (routingTable != null) {
+          unavailableSegments.addAll(routingTable.getUnavailableSegments());
+          Map<ServerInstance, List<String>> serverInstanceToSegmentsMap = routingTable.getServerInstanceToSegmentsMap();
+          if (!serverInstanceToSegmentsMap.isEmpty()) {
+            for (Map.Entry<ServerInstance, List<String>> serverInstanceSegments : serverInstanceToSegmentsMap.entrySet()) {
+              offlineRoutingTable
+                  .computeIfAbsent(serverInstanceSegments.getKey(), k -> new ArrayList<>())
+                  .addAll(serverInstanceSegments.getValue());
+            }
+          }
+          numPrunedSegmentsTotal += routingTable.getNumPrunedSegments();
+        }
+      }
+    }
+    if (!realtimeBrokerRequests.isEmpty()) {
+      for (BrokerRequest realtimeReq : realtimeBrokerRequests) {
+        // NOTE: Routing table might be null if table is just removed
+        RoutingTable routingTable = _routingManager.getRoutingTable(realtimeReq, requestId);
+        if (routingTable != null) {
+          unavailableSegments.addAll(routingTable.getUnavailableSegments());
+          Map<ServerInstance, List<String>> serverInstanceToSegmentsMap = routingTable.getServerInstanceToSegmentsMap();
+          if (!serverInstanceToSegmentsMap.isEmpty()) {
+            for (Map.Entry<ServerInstance, List<String>> serverInstanceSegments : serverInstanceToSegmentsMap.entrySet()) {
+              realtimeRoutingTable
+                  .computeIfAbsent(serverInstanceSegments.getKey(), k -> new ArrayList<>())
+                  .addAll(serverInstanceSegments.getValue());
+            }
+          }
+          numPrunedSegmentsTotal += routingTable.getNumPrunedSegments();
+        }
+      }
+    }
+
+    int numUnavailableSegments = unavailableSegments.size();
+    requestContext.setNumUnavailableSegments(numUnavailableSegments);
+
+    List<ProcessingException> exceptions = new ArrayList<>();
+    if (numUnavailableSegments > 0) {
+      String errorMessage;
+      if (numUnavailableSegments > MAX_UNAVAILABLE_SEGMENTS_TO_PRINT_IN_QUERY_EXCEPTION) {
+        errorMessage = String.format("%d segments unavailable, sampling %d: %s", numUnavailableSegments,
+            MAX_UNAVAILABLE_SEGMENTS_TO_PRINT_IN_QUERY_EXCEPTION,
+            unavailableSegments.subList(0, MAX_UNAVAILABLE_SEGMENTS_TO_PRINT_IN_QUERY_EXCEPTION));
+      } else {
+        errorMessage = String.format("%d segments unavailable: %s", numUnavailableSegments, unavailableSegments);
+      }
+      exceptions.add(QueryException.getException(QueryException.BROKER_SEGMENT_UNAVAILABLE_ERROR, errorMessage));
+      _brokerMetrics.addMeteredTableValue(logicalTable.getTableNameWithType(), BrokerMeter.BROKER_RESPONSES_WITH_UNAVAILABLE_SEGMENTS, 1);
+    }
+
+    if (offlineBrokerRequests.isEmpty() && realtimeBrokerRequests.isEmpty()) {
+      if (!exceptions.isEmpty()) {
+        LOGGER.info("No server found for request {}: {}", requestId, query);
+        _brokerMetrics.addMeteredTableValue(logicalTable.getTableNameWithType(), BrokerMeter.NO_SERVER_FOUND_EXCEPTIONS, 1);
+        return new BrokerResponseNative(exceptions);
+      } else {
+        // When all segments have been pruned, we can just return an empty response.
+        return getEmptyBrokerOnlyResponse(requestId, query, requesterIdentity, requestContext, pinotQuery, logicalTable.getTableNameWithType());
+      }
+    }
+
+    long routingEndTimeNs = System.nanoTime();
+    _brokerMetrics.addPhaseTiming(rawTableName, BrokerQueryPhase.QUERY_ROUTING,
+        routingEndTimeNs - routingStartTimeNs);
+
+    // Set timeout in the requests
+    long timeSpentMs = TimeUnit.NANOSECONDS.toMillis(routingEndTimeNs - compilationStartTimeNs);
+
+    long remainingTimeMs = 0;
+    try {
+      remainingTimeMs = getRemainingTimeMs(timeSpentMs, realtimeBrokerRequest, offlineBrokerRequest);
+    } catch (TimeoutException e) {
+      String errorMessage = e.getMessage();
+      LOGGER.info("{} {}: {}", errorMessage, requestId, query);
+      _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.REQUEST_TIMEOUT_BEFORE_SCATTERED_EXCEPTIONS, 1);
+      exceptions.add(QueryException.getException(QueryException.BROKER_TIMEOUT_ERROR, errorMessage));
+      return new BrokerResponseNative(exceptions);
+    }
   }
 
   private BrokerResponseNative getEmptyBrokerOnlyResponse(long requestId, String query,
