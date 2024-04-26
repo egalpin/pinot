@@ -82,8 +82,8 @@ public class MockRoutingManagerFactory {
 
   private void registerTableNameWithType(Schema schema, String tableNameWithType) {
     String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
-    _tableNameMap.put(tableNameWithType, Collections.singletonList(tableNameWithType));
-    _tableNameMap.put(rawTableName, Collections.singletonList(rawTableName));
+    _tableNameMap.put(tableNameWithType, tableNameWithType);
+    _tableNameMap.put(rawTableName, rawTableName);
     _schemaMap.put(rawTableName, schema);
   }
 
