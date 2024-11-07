@@ -283,7 +283,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
     private PinotQuery _pinotQuery;
     private PinotQuery _serverPinotQuery;
     private Schema _schema;
-    private String _tableName;
+    private String _physicalTableName;
     private String _rawTableName;
     private BrokerResponseNative _queryCompileError;
   }
@@ -388,9 +388,9 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
           new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
       return compiledPinotQuery;
     }
-    compiledPinotQuery._tableName = tableName;
-    dataSource.setTableName(compiledPinotQuery._tableName);
-    String rawTableName = TableNameBuilder.extractRawTableName(compiledPinotQuery._tableName);
+    compiledPinotQuery._physicalTableName = tableName;
+    dataSource.setTableName(compiledPinotQuery._physicalTableName);
+    String rawTableName = TableNameBuilder.extractRawTableName(compiledPinotQuery._physicalTableName);
     compiledPinotQuery._rawTableName = rawTableName;
     requestContext.setTableName(rawTableName);
 
@@ -468,17 +468,17 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       AuthorizationResult authorizationResult = accessControl.authorize(requesterIdentity, serverBrokerRequest);
       if (authorizationResult.hasAccess()) {
         authorizationResult =
-            accessControl.authorize(httpHeaders, TargetType.TABLE, compiledPinotQuery._tableName, Actions.Table.QUERY);
+            accessControl.authorize(httpHeaders, TargetType.TABLE, compiledPinotQuery._physicalTableName, Actions.Table.QUERY);
       }
 
       _brokerMetrics.addPhaseTiming(compiledPinotQuery._rawTableName, BrokerQueryPhase.AUTHORIZATION,
           System.nanoTime() - compilationEndTimeNs);
 
       if (!authorizationResult.hasAccess()) {
-        _brokerMetrics.addMeteredTableValue(compiledPinotQuery._tableName,
+        _brokerMetrics.addMeteredTableValue(compiledPinotQuery._physicalTableName,
             BrokerMeter.REQUEST_DROPPED_DUE_TO_ACCESS_ERROR, 1);
         LOGGER.info("Access denied for request {}: {}, table: {}, reason :{}", requestId, query,
-            compiledPinotQuery._tableName, authorizationResult.getFailureMessage());
+            compiledPinotQuery._physicalTableName, authorizationResult.getFailureMessage());
         requestContext.setErrorCode(QueryException.ACCESS_DENIED_ERROR_CODE);
         String failureMessage = authorizationResult.getFailureMessage();
         if (StringUtils.isNotBlank(failureMessage)) {
@@ -488,7 +488,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       }
 
       // Validate QPS quota
-      String database = DatabaseUtils.extractDatabaseFromFullyQualifiedTableName(compiledPinotQuery._tableName);
+      String database = DatabaseUtils.extractDatabaseFromFullyQualifiedTableName(compiledPinotQuery._physicalTableName);
       if (!_queryQuotaManager.acquireDatabase(database)) {
         String errorMessage =
             String.format("Request %d: %s exceeds query quota for database: %s", requestId, query, database);
@@ -496,9 +496,9 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
         requestContext.setErrorCode(QueryException.TOO_MANY_REQUESTS_ERROR_CODE);
         return new BrokerResponseNative(QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
       }
-      if (!_queryQuotaManager.acquire(compiledPinotQuery._tableName)) {
+      if (!_queryQuotaManager.acquire(compiledPinotQuery._physicalTableName)) {
         String errorMessage = String.format("Request %d: %s exceeds query quota for table: %s", requestId, query,
-            compiledPinotQuery._tableName);
+            compiledPinotQuery._physicalTableName);
         LOGGER.info(errorMessage);
         requestContext.setErrorCode(QueryException.TOO_MANY_REQUESTS_ERROR_CODE);
         _brokerMetrics.addMeteredTableValue(compiledPinotQuery._rawTableName, BrokerMeter.QUERY_QUOTA_EXCEEDED, 1);
@@ -558,7 +558,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       tableRoutingContext.setFanoutTypeAndTenants(requestContext);
 
       if (offlineBrokerRequest == null && realtimeBrokerRequest == null) {
-        return getEmptyBrokerOnlyResponse(compiledPinotQuery._pinotQuery, requestContext, compiledPinotQuery._tableName,
+        return getEmptyBrokerOnlyResponse(compiledPinotQuery._pinotQuery, requestContext, compiledPinotQuery._physicalTableName,
             requesterIdentity);
       }
 
@@ -645,7 +645,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
         } else {
           // When all segments have been pruned, we can just return an empty response.
           return getEmptyBrokerOnlyResponse(compiledPinotQuery._pinotQuery, requestContext,
-              compiledPinotQuery._tableName, requesterIdentity);
+              compiledPinotQuery._physicalTableName, requesterIdentity);
         }
       }
       long routingEndTimeNs = System.nanoTime();
@@ -770,7 +770,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
           TimeUnit.MILLISECONDS);
 
       // Log query and stats
-      _queryLogger.log(new QueryLogger.QueryLogParams(requestContext, compiledPinotQuery._tableName, brokerResponse,
+      _queryLogger.log(new QueryLogger.QueryLogParams(requestContext, compiledPinotQuery._physicalTableName, brokerResponse,
           requesterIdentity, serverStats));
 
       return brokerResponse;
@@ -878,29 +878,29 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
 
     boolean realtimeRoutingExists = false;
     boolean offlineRoutingExists = false;
-    TableType tableType = TableNameBuilder.getTableTypeFromTableName(compiledPinotQuery._tableName);
+    TableType tableType = TableNameBuilder.getTableTypeFromTableName(compiledPinotQuery._physicalTableName);
 
     if (tableType == TableType.OFFLINE) {
       // Offline table
-      if (_routingManager.routingExists(compiledPinotQuery._tableName)) {
+      if (_routingManager.routingExists(compiledPinotQuery._physicalTableName)) {
         offlineRoutingExists = true;
       }
     } else if (tableType == TableType.REALTIME) {
       // Realtime table
-      if (_routingManager.routingExists(compiledPinotQuery._tableName)) {
+      if (_routingManager.routingExists(compiledPinotQuery._physicalTableName)) {
         realtimeRoutingExists = true;
       }
     } else {
       // Hybrid table (check both OFFLINE and REALTIME)
-      if (_routingManager.routingExists(TableNameBuilder.OFFLINE.tableNameWithType(compiledPinotQuery._tableName))) {
+      if (_routingManager.routingExists(TableNameBuilder.OFFLINE.tableNameWithType(compiledPinotQuery._physicalTableName))) {
         offlineRoutingExists = true;
       }
-      if (_routingManager.routingExists(TableNameBuilder.REALTIME.tableNameWithType(compiledPinotQuery._tableName))) {
+      if (_routingManager.routingExists(TableNameBuilder.REALTIME.tableNameWithType(compiledPinotQuery._physicalTableName))) {
         realtimeRoutingExists = true;
       }
     }
 
-    String rawTableName = TableNameBuilder.extractRawTableName(compiledPinotQuery._tableName);
+    String rawTableName = TableNameBuilder.extractRawTableName(compiledPinotQuery._physicalTableName);
     TableConfig offlineTableConfig =
         _tableCache.getTableConfig(TableNameBuilder.OFFLINE.tableNameWithType(rawTableName));
     TableConfig realtimeTableConfig =
