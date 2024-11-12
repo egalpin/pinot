@@ -149,6 +149,9 @@ public class BrokerReduceService extends BaseReduceService {
     }
 
     QueryContext serverQueryContext = QueryContextConverterUtils.getQueryContext(serverBrokerRequest.getPinotQuery());
+    // TODO(egalpin): does dataTableReducer need to be created and utilized per physical table in a logical table
+    //  query? If the dataTableMap contained the serverBrokerRequest or the associated PinotQuery, we could do that.
+    //  Maybe this is a later iteration.
     DataTableReducer dataTableReducer = ResultReducerFactory.getResultReducer(serverQueryContext);
 
     Integer minGroupTrimSizeQueryOption = null;

@@ -278,160 +278,200 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
     return true;
   }
 
-  private static class CompiledPinotQuery {
-    private String _rawQuery;
-    private PinotQuery _pinotQuery;
-    private PinotQuery _serverPinotQuery;
-    private Schema _schema;
-    private String _tableName;
-    private String _rawTableName;
-    private BrokerResponseNative _queryCompileError;
+  private static class ParsedQuery {
+    private final String _rawQuery;
+    private final PinotQuery _pinotQuery;
+    private final PinotQuery _serverPinotQuery;
+    private final boolean _isGapFillStripped;
+
+    public ParsedQuery(String query, SqlNodeAndOptions sqlNodeAndOptions) {
+      _rawQuery = query;
+      _pinotQuery = CalciteSqlParser.compileToPinotQuery(sqlNodeAndOptions);
+      _serverPinotQuery = GapfillUtils.stripGapfill(_pinotQuery);
+
+      if (_pinotQuery == _serverPinotQuery) {
+        _isGapFillStripped = true;
+      } else {
+        _isGapFillStripped = false;
+      }
+    }
+
+    public DataSource getDataSource() {
+      return _serverPinotQuery.getDataSource();
+    }
+
+    public String getTableName() {
+      return getDataSource().getTableName();
+    }
+
+    public void setTableName(String tableName) {
+      getDataSource().setTableName(tableName);
+    }
+
+    public boolean isGapFillStripped() {
+      return _isGapFillStripped;
+    }
+
+    public PinotQuery getPinotQuery() {
+      return _pinotQuery;
+    }
+
+    public PinotQuery getServerPinotQuery() {
+      if (isGapFillStripped()) {
+        return _serverPinotQuery;
+      }
+
+      return _pinotQuery;
+    }
+
+    public BrokerRequest getCleanBrokerRequest() {
+      return CalciteSqlCompiler.convertToBrokerRequest(_pinotQuery);
+    }
+
+    public BrokerRequest getCleanServerBrokerRequest() {
+      if (isGapFillStripped()) {
+        return CalciteSqlCompiler.convertToBrokerRequest(_serverPinotQuery);
+      }
+
+      return getCleanBrokerRequest();
+    }
   }
 
-  private CompiledPinotQuery compilePinotQuery(long requestId, String query, SqlNodeAndOptions sqlNodeAndOptions,
-      JsonNode request, @Nullable RequesterIdentity requesterIdentity, RequestContext requestContext,
-      @Nullable HttpHeaders httpHeaders, AccessControl accessControl) {
-    // Compile the request into PinotQuery
-    CompiledPinotQuery compiledPinotQuery = new CompiledPinotQuery();
-    compiledPinotQuery._rawQuery = query;
-
-    PinotQuery pinotQuery;
+  private ParsedQuery parseRawQuery(long requestId, String query, SqlNodeAndOptions sqlNodeAndOptions,
+      @Nullable HttpHeaders httpHeaders)
+      throws ProcessingException {
     try {
-      pinotQuery = CalciteSqlParser.compileToPinotQuery(sqlNodeAndOptions);
+      ParsedQuery parsedQuery = new ParsedQuery(query, sqlNodeAndOptions);
+      DataSource dataSource = parsedQuery.getDataSource();
+      if (dataSource == null) {
+        LOGGER.info("Data source (FROM clause) not found in request {}: {}", requestId, query);
+        throw QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "Data source (FROM clause) not found");
+      }
+      if (dataSource.getJoin() != null) {
+        LOGGER.info("JOIN is not supported in request {}: {}", requestId, query);
+        throw QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "JOIN is not supported");
+      }
+      if (dataSource.getTableName() == null) {
+        LOGGER.info("Table name not found in request {}: {}", requestId, query);
+        throw QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "Table name not found");
+      }
+
+      return parsedQuery;
+
     } catch (Exception e) {
       LOGGER.info("Caught exception while compiling SQL request {}: {}, {}", requestId, query, e.getMessage());
       _brokerMetrics.addMeteredGlobalValue(BrokerMeter.REQUEST_COMPILATION_EXCEPTIONS, 1);
-      requestContext.setErrorCode(QueryException.SQL_PARSING_ERROR_CODE);
       // Check if the query is a v2 supported query
       String database = DatabaseUtils.extractDatabaseFromQueryRequest(sqlNodeAndOptions.getOptions(), httpHeaders);
       if (ParserUtils.canCompileWithMultiStageEngine(query, database, _tableCache)) {
-        compiledPinotQuery._queryCompileError = new BrokerResponseNative(
-            QueryException.getException(QueryException.SQL_PARSING_ERROR, new Exception(
+        throw QueryException.getException(QueryException.SQL_PARSING_ERROR, new Exception(
                 "It seems that the query is only supported by the multi-stage query engine, please retry the query "
                     + "using " + "the multi-stage query engine "
-                    + "(https://docs.pinot.apache.org/developers/advanced/v2-multi-stage-query-engine)")));
-        return compiledPinotQuery;
+                    + "(https://docs.pinot.apache.org/developers/advanced/v2-multi-stage-query-engine)"));
       } else {
-        compiledPinotQuery._queryCompileError =
-            new BrokerResponseNative(QueryException.getException(QueryException.SQL_PARSING_ERROR, e));
-        return compiledPinotQuery;
+        throw QueryException.getException(QueryException.SQL_PARSING_ERROR, e);
       }
     }
+  }
 
-    compiledPinotQuery._pinotQuery = pinotQuery;
+  private static class CompiledPinotQuery {
+    private ParsedQuery _parsedQuery;
+    private Schema _schema;
+    private String _tableName;  // table name possibly including type suffix
+    private String _rawTableName;  // table name without type suffix
 
-    if (isLiteralOnlyQuery(pinotQuery)) {
-      LOGGER.debug("Request {} contains only Literal, skipping server query: {}", requestId, query);
-      try {
-        if (pinotQuery.isExplain()) {
-          // EXPLAIN PLAN results to show that query is evaluated exclusively by Broker.
-          compiledPinotQuery._queryCompileError = BrokerResponseNative.BROKER_ONLY_EXPLAIN_PLAN_OUTPUT;
-          return compiledPinotQuery;
-        }
-        compiledPinotQuery._queryCompileError = processLiteralOnlyQuery(requestId, pinotQuery, requestContext);
-        return compiledPinotQuery;
-      } catch (Exception e) {
-        // TODO: refine the exceptions here to early termination the queries won't requires to send to servers.
-        LOGGER.warn("Unable to execute literal request {}: {} at broker, fallback to server query. {}", requestId,
-            query, e.getMessage());
-      }
+    public CompiledPinotQuery(ParsedQuery parsedQuery) {
+      _parsedQuery = parsedQuery;
     }
+  }
 
-    PinotQuery serverPinotQuery = GapfillUtils.stripGapfill(pinotQuery);
-    compiledPinotQuery._serverPinotQuery = serverPinotQuery;
-    DataSource dataSource = serverPinotQuery.getDataSource();
-    if (dataSource == null) {
-      LOGGER.info("Data source (FROM clause) not found in request {}: {}", requestId, query);
-      requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-      compiledPinotQuery._queryCompileError = new BrokerResponseNative(
-          QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "Data source (FROM clause) not found"));
-      return compiledPinotQuery;
-    }
-    if (dataSource.getJoin() != null) {
-      LOGGER.info("JOIN is not supported in request {}: {}", requestId, query);
-      requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-      compiledPinotQuery._queryCompileError = new BrokerResponseNative(
-          QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "JOIN is not supported"));
-      return compiledPinotQuery;
-    }
-    if (dataSource.getTableName() == null) {
-      LOGGER.info("Table name not found in request {}: {}", requestId, query);
-      requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-      compiledPinotQuery._queryCompileError = new BrokerResponseNative(
-          QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, "Table name not found"));
-      return compiledPinotQuery;
-    }
-
-    try {
-      handleSubquery(serverPinotQuery, requestId, request, requesterIdentity, requestContext, httpHeaders,
-          accessControl);
-    } catch (Exception e) {
-      LOGGER.info("Caught exception while handling the subquery in request {}: {}, {}", requestId, query,
-          e.getMessage());
-      requestContext.setErrorCode(QueryException.QUERY_EXECUTION_ERROR_CODE);
-      compiledPinotQuery._queryCompileError =
-          new BrokerResponseNative(QueryException.getException(QueryException.QUERY_EXECUTION_ERROR, e));
-      return compiledPinotQuery;
-    }
+  private CompiledPinotQuery compilePinotQuery(long requestId, ParsedQuery parsedQuery,
+      @Nullable HttpHeaders httpHeaders)
+      throws ProcessingException {
+    CompiledPinotQuery compiledPinotQuery = new CompiledPinotQuery(parsedQuery);
 
     boolean ignoreCase = _tableCache.isIgnoreCase();
     String tableName;
     try {
-      tableName =
-          getActualTableName(DatabaseUtils.translateTableName(dataSource.getTableName(), httpHeaders, ignoreCase),
-              _tableCache);
+      tableName = getActualTableName(
+          DatabaseUtils.translateTableName(parsedQuery.getDataSource().getTableName(), httpHeaders, ignoreCase),
+          _tableCache);
     } catch (DatabaseConflictException e) {
-      LOGGER.info("{}. Request {}: {}", e.getMessage(), requestId, query);
+      LOGGER.info("{}. Request {}: {}", e.getMessage(), requestId, parsedQuery._rawQuery);
       _brokerMetrics.addMeteredGlobalValue(BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
-      requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-      compiledPinotQuery._queryCompileError =
-          new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
-      return compiledPinotQuery;
+      throw QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e);
     }
     compiledPinotQuery._tableName = tableName;
-    dataSource.setTableName(compiledPinotQuery._tableName);
+    parsedQuery.getDataSource().setTableName(compiledPinotQuery._tableName);
     String rawTableName = TableNameBuilder.extractRawTableName(compiledPinotQuery._tableName);
     compiledPinotQuery._rawTableName = rawTableName;
-    requestContext.setTableName(rawTableName);
 
     try {
       Map<String, String> columnNameMap = _tableCache.getColumnNameMap(rawTableName);
       if (columnNameMap != null) {
-        updateColumnNames(rawTableName, serverPinotQuery, ignoreCase, columnNameMap);
+        updateColumnNames(rawTableName, parsedQuery.getServerPinotQuery(), ignoreCase, columnNameMap);
       }
     } catch (Exception e) {
       // Throw exceptions with column in-existence error.
       if (e instanceof BadQueryRequestException) {
-        LOGGER.info("Caught exception while checking column names in request {}: {}, {}", requestId, query,
-            e.getMessage());
-        requestContext.setErrorCode(QueryException.UNKNOWN_COLUMN_ERROR_CODE);
+        LOGGER.info("Caught exception while checking column names in request {}: {}, {}", requestId,
+            parsedQuery._rawQuery, e.getMessage());
         _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.UNKNOWN_COLUMN_EXCEPTIONS, 1);
-        compiledPinotQuery._queryCompileError =
-            new BrokerResponseNative(QueryException.getException(QueryException.UNKNOWN_COLUMN_ERROR, e));
-        return compiledPinotQuery;
+        throw QueryException.getException(QueryException.UNKNOWN_COLUMN_ERROR, e);
       }
-      LOGGER.warn("Caught exception while updating column names in request {}: {}, {}", requestId, query,
-          e.getMessage());
+      LOGGER.warn("Caught exception while updating column names in request {}: {}, {}", requestId,
+          parsedQuery._rawQuery, e.getMessage());
     }
+
+    // Optionally hoist and elsewhere apply the overrides that are not table-specific
     if (_defaultHllLog2m > 0) {
-      handleHLLLog2mOverride(serverPinotQuery, _defaultHllLog2m);
+      handleHLLLog2mOverride(parsedQuery.getServerPinotQuery(), _defaultHllLog2m);
     }
     if (_enableQueryLimitOverride) {
-      handleQueryLimitOverride(serverPinotQuery, _queryResponseLimit);
+      handleQueryLimitOverride(parsedQuery.getServerPinotQuery(), _queryResponseLimit);
     }
-    handleSegmentPartitionedDistinctCountOverride(serverPinotQuery,
+    handleSegmentPartitionedDistinctCountOverride(parsedQuery.getServerPinotQuery(),
         getSegmentPartitionedColumns(_tableCache, tableName));
     if (_enableDistinctCountBitmapOverride) {
-      handleDistinctCountBitmapOverride(serverPinotQuery);
+      handleDistinctCountBitmapOverride(parsedQuery.getServerPinotQuery());
     }
 
     Schema schema = _tableCache.getSchema(rawTableName);
     compiledPinotQuery._schema = schema;
     if (schema != null) {
-      handleDistinctMultiValuedOverride(serverPinotQuery, schema);
+      handleDistinctMultiValuedOverride(parsedQuery.getServerPinotQuery(), schema);
     }
 
     return compiledPinotQuery;
+  }
+
+  private void authorizeRequest(long requestId, AccessControl accessControl, RequesterIdentity requesterIdentity,
+      RequestContext requestContext, CompiledPinotQuery compiledPinotQuery, BrokerRequest serverBrokerRequest,
+      @Nullable HttpHeaders httpHeaders) {
+
+    AuthorizationResult authorizationResult = accessControl.authorize(requesterIdentity, serverBrokerRequest);
+    if (authorizationResult.hasAccess()) {
+      authorizationResult =
+          accessControl.authorize(httpHeaders, TargetType.TABLE, compiledPinotQuery._tableName, Actions.Table.QUERY);
+    }
+
+    // TODO(egalpin): re-enable this
+//    _brokerMetrics.addPhaseTiming(compiledPinotQuery._rawTableName, BrokerQueryPhase.AUTHORIZATION,
+//        System.nanoTime() - compilationEndTimeNs);
+
+    if (!authorizationResult.hasAccess()) {
+      _brokerMetrics.addMeteredTableValue(compiledPinotQuery._tableName,
+          BrokerMeter.REQUEST_DROPPED_DUE_TO_ACCESS_ERROR, 1);
+      LOGGER.info("Access denied for request {}: {}, table: {}, reason :{}", requestId,
+          compiledPinotQuery._parsedQuery._rawQuery, compiledPinotQuery._tableName,
+          authorizationResult.getFailureMessage());
+      requestContext.setErrorCode(QueryException.ACCESS_DENIED_ERROR_CODE);
+      String failureMessage = authorizationResult.getFailureMessage();
+      if (StringUtils.isNotBlank(failureMessage)) {
+        failureMessage = "Reason: " + failureMessage;
+      }
+      throw new WebApplicationException("Permission denied." + failureMessage, Response.Status.FORBIDDEN);
+    }
   }
 
   @Override
@@ -446,14 +486,65 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
 
     try {
       long compilationStartTimeNs = System.nanoTime();
-      CompiledPinotQuery compiledPinotQuery =
-          compilePinotQuery(requestId, query, sqlNodeAndOptions, request, requesterIdentity, requestContext,
-              httpHeaders, accessControl);
-      long compilationEndTimeNs = System.nanoTime();
 
-      if (compiledPinotQuery._queryCompileError != null) {
-        return compiledPinotQuery._queryCompileError;
+      ParsedQuery parsedQuery;
+      try {
+        parsedQuery = parseRawQuery(requestId, query, sqlNodeAndOptions, httpHeaders);
+      } catch (ProcessingException e) {
+        requestContext.setErrorCode(e.getErrorCode());
+        return new BrokerResponseNative(e);
       }
+
+      if (isLiteralOnlyQuery(parsedQuery.getPinotQuery())) {
+        LOGGER.debug("Request {} contains only Literal, skipping server query: {}", requestId, query);
+        try {
+          if (parsedQuery.getPinotQuery().isExplain()) {
+            // EXPLAIN PLAN results to show that query is evaluated exclusively by Broker.
+            return BrokerResponseNative.BROKER_ONLY_EXPLAIN_PLAN_OUTPUT;
+          }
+          return processLiteralOnlyQuery(requestId, parsedQuery.getPinotQuery(), requestContext);
+        } catch (Exception e) {
+          // TODO: refine the exceptions here to early termination the queries won't requires to send to servers.
+          LOGGER.warn("Unable to execute literal request {}: {} at broker, fallback to server query. {}", requestId,
+              query, e.getMessage());
+        }
+      }
+
+      try {
+        handleSubquery(parsedQuery.getServerPinotQuery(), requestId, request, requesterIdentity, requestContext,
+            httpHeaders, accessControl);
+      } catch (Exception e) {
+        LOGGER.info("Caught exception while handling the subquery in request {}: {}, {}", requestId,
+            parsedQuery.getPinotQuery(), e.getMessage());
+        throw QueryException.getException(QueryException.QUERY_EXECUTION_ERROR, e);
+      }
+
+      // Validate the request
+      try {
+        validateRequest(parsedQuery.getServerPinotQuery(), _queryResponseLimit);
+      } catch (Exception e) {
+        LOGGER.info("Caught exception while validating request {}: {}, {}", requestId, query, e.getMessage());
+        requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
+        _brokerMetrics.addMeteredTableValue(parsedQuery.getDataSource().getTableName(),
+            BrokerMeter.QUERY_VALIDATION_EXCEPTIONS, 1);
+        return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
+      }
+
+      // TODO(egalpin): get list of associated tables here. Treat all queries the same, but non-logical-table queries
+      //  simply have 1 associated table (including possibly 1 hybrid table, which is 2 physical tables)
+
+      List<String> LogicalTableUtils.getAllAssociatedTableNames(parsedQuery.getTableName());
+
+      // TODO(egalpin): up to here can be shared across Logical table fanout. Below should operate in a loop.
+      // TODO(egalpin): compiling the query may need to be done on a per-table basis for logical tables
+      CompiledPinotQuery compiledPinotQuery;
+      try {
+        compiledPinotQuery = compilePinotQuery(requestId, parsedQuery, httpHeaders);
+      } catch (ProcessingException e) {
+        requestContext.setErrorCode(e.getErrorCode());
+        return new BrokerResponseNative(e);
+      }
+      long compilationEndTimeNs = System.nanoTime();
 
       // full request compile time = compilationTimeNs + parserTimeNs
       _brokerMetrics.addPhaseTiming(compiledPinotQuery._rawTableName, BrokerQueryPhase.REQUEST_COMPILATION,
@@ -461,31 +552,14 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
 
       // Second-stage table-level access control
       // TODO: Modify AccessControl interface to directly take PinotQuery
-      BrokerRequest brokerRequest = CalciteSqlCompiler.convertToBrokerRequest(compiledPinotQuery._pinotQuery);
-      BrokerRequest serverBrokerRequest =
-          compiledPinotQuery._serverPinotQuery == compiledPinotQuery._pinotQuery ? brokerRequest
-              : CalciteSqlCompiler.convertToBrokerRequest(compiledPinotQuery._serverPinotQuery);
-      AuthorizationResult authorizationResult = accessControl.authorize(requesterIdentity, serverBrokerRequest);
-      if (authorizationResult.hasAccess()) {
-        authorizationResult =
-            accessControl.authorize(httpHeaders, TargetType.TABLE, compiledPinotQuery._tableName, Actions.Table.QUERY);
-      }
+      // TODO(egalpin): perform authorization for each physical table in Logical table?
+      BrokerRequest brokerRequest = parsedQuery.getCleanBrokerRequest();
+      BrokerRequest serverBrokerRequest = parsedQuery.getCleanServerBrokerRequest();
 
-      _brokerMetrics.addPhaseTiming(compiledPinotQuery._rawTableName, BrokerQueryPhase.AUTHORIZATION,
-          System.nanoTime() - compilationEndTimeNs);
-
-      if (!authorizationResult.hasAccess()) {
-        _brokerMetrics.addMeteredTableValue(compiledPinotQuery._tableName,
-            BrokerMeter.REQUEST_DROPPED_DUE_TO_ACCESS_ERROR, 1);
-        LOGGER.info("Access denied for request {}: {}, table: {}, reason :{}", requestId, query,
-            compiledPinotQuery._tableName, authorizationResult.getFailureMessage());
-        requestContext.setErrorCode(QueryException.ACCESS_DENIED_ERROR_CODE);
-        String failureMessage = authorizationResult.getFailureMessage();
-        if (StringUtils.isNotBlank(failureMessage)) {
-          failureMessage = "Reason: " + failureMessage;
-        }
-        throw new WebApplicationException("Permission denied." + failureMessage, Response.Status.FORBIDDEN);
-      }
+      // TODO(egalpin): get all tables associated with query, loop through them and replace table name in each
+      //  iteration via serverBrokerRequest.getQuerySource().setTableName(), and then run accessControl.authorize again.
+      authorizeRequest(requestId, accessControl, requesterIdentity, requestContext, compiledPinotQuery,
+          serverBrokerRequest, httpHeaders);
 
       // Validate QPS quota
       String database = DatabaseUtils.extractDatabaseFromFullyQualifiedTableName(compiledPinotQuery._tableName);
@@ -505,23 +579,12 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
         return new BrokerResponseNative(QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
       }
 
-      // Validate the request
-      try {
-        validateRequest(compiledPinotQuery._serverPinotQuery, _queryResponseLimit);
-      } catch (Exception e) {
-        LOGGER.info("Caught exception while validating request {}: {}, {}", requestId, query, e.getMessage());
-        requestContext.setErrorCode(QueryException.QUERY_VALIDATION_ERROR_CODE);
-        _brokerMetrics.addMeteredTableValue(compiledPinotQuery._rawTableName, BrokerMeter.QUERY_VALIDATION_EXCEPTIONS,
-            1);
-        return new BrokerResponseNative(QueryException.getException(QueryException.QUERY_VALIDATION_ERROR, e));
-      }
-
       _brokerMetrics.addMeteredTableValue(compiledPinotQuery._rawTableName, BrokerMeter.QUERIES, 1);
       _brokerMetrics.addMeteredGlobalValue(BrokerMeter.QUERIES_GLOBAL, 1);
       _brokerMetrics.addValueToTableGauge(compiledPinotQuery._rawTableName, BrokerGauge.REQUEST_SIZE, query.length());
 
       // TODO(egalpin): how to handle EXPLAIN queries for logical tables?
-      if (!compiledPinotQuery._pinotQuery.isExplain() && _enableMultistageMigrationMetric) {
+      if (!compiledPinotQuery._parsedQuery.getPinotQuery().isExplain() && _enableMultistageMigrationMetric) {
         // Check if the query is a v2 supported query
         database = DatabaseUtils.extractDatabaseFromQueryRequest(sqlNodeAndOptions.getOptions(), httpHeaders);
         // Attempt to add the query to the compile queue; drop if queue is full
@@ -530,8 +593,6 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
               query);
         }
       }
-
-      // TODO(egalpin): up to here can be shared across Logical table fanout. Below should operate in a loop.
 
       // Get the tables hit by the request
       TableRoutingContext tableRoutingContext = resolvePhysicalTables(requestId, compiledPinotQuery);
@@ -544,10 +605,10 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       HandlerContext handlerContext =
           getHandlerContext(tableRoutingContext._offlineTableConfig, tableRoutingContext._realtimeTableConfig);
       if (handlerContext._disableGroovy) {
-        rejectGroovyQuery(compiledPinotQuery._serverPinotQuery);
+        rejectGroovyQuery(compiledPinotQuery._parsedQuery.getServerPinotQuery());
       }
       if (handlerContext._useApproximateFunction) {
-        handleApproximateFunctionOverride(compiledPinotQuery._serverPinotQuery);
+        handleApproximateFunctionOverride(compiledPinotQuery._parsedQuery.getServerPinotQuery());
       }
 
       // Prepare OFFLINE and REALTIME requests
@@ -558,13 +619,14 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       tableRoutingContext.setFanoutTypeAndTenants(requestContext);
 
       if (offlineBrokerRequest == null && realtimeBrokerRequest == null) {
-        return getEmptyBrokerOnlyResponse(compiledPinotQuery._pinotQuery, requestContext, compiledPinotQuery._tableName,
-            requesterIdentity);
+        return getEmptyBrokerOnlyResponse(compiledPinotQuery._parsedQuery.getPinotQuery(), requestContext,
+            compiledPinotQuery._tableName, requesterIdentity);
       }
 
       // Calculate routing table for the query
       // TODO: Modify RoutingManager interface to directly take PinotQuery
       long routingStartTimeNs = System.nanoTime();
+      // TODO(egalpin) share the queryRoutingTable across loop iterations for all tables hit by logical table
       Map<ServerInstance, List<ServerQueryRoutingContext>> queryRoutingTable = new HashMap<>();
       List<String> unavailableSegments = new ArrayList<>();
       int numPrunedSegmentsTotal = 0;
@@ -587,9 +649,10 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       }
 
       // TODO: Assess if the Explain Plan Query should also be routed to REALTIME servers for HYBRID tables
-      if (realtimeBrokerRequest != null && !realtimeTableDisabled && (!compiledPinotQuery._pinotQuery.isExplain()
-          || offlineBrokerRequest != null)) {
+      if (realtimeBrokerRequest != null && !realtimeTableDisabled && (
+          !compiledPinotQuery._parsedQuery.getPinotQuery().isExplain() || offlineBrokerRequest != null)) {
         // Don't send explain queries to realtime for OFFLINE or HYBRID tables
+        // TODO(egalpin): sum numPrunedSegments across loop iterations, likewise unavailableSegments
         Integer numPrunedSegments =
             updateRoutingTable(requestId, realtimeBrokerRequest, queryRoutingTable, unavailableSegments);
         if (numPrunedSegments == null) {
@@ -617,6 +680,14 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       int numUnavailableSegments = unavailableSegments.size();
       requestContext.setNumUnavailableSegments(numUnavailableSegments);
 
+
+
+      /////// LOOP ENDS HERE
+
+
+
+      // TODO(egalpin): this max unavailable check may need to move later in this code path (outside of logical
+      //  tables loop)
       if (numUnavailableSegments > 0) {
         String errorMessage;
         if (numUnavailableSegments > MAX_UNAVAILABLE_SEGMENTS_TO_PRINT_IN_QUERY_EXCEPTION) {
@@ -626,6 +697,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
         } else {
           errorMessage = String.format("%d segments unavailable: %s", numUnavailableSegments, unavailableSegments);
         }
+
         String realtimeRoutingPolicy =
             realtimeBrokerRequest != null ? getRoutingPolicy(tableRoutingContext._realtimeTableConfig) : null;
         String offlineRoutingPolicy =
@@ -636,6 +708,8 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
             BrokerMeter.BROKER_RESPONSES_WITH_UNAVAILABLE_SEGMENTS, 1);
       }
 
+      // TODO(egalpin): collection list of offline/realtime broker requests above. Replace these predicates with
+      //  empty list checks
       if (offlineBrokerRequest == null && realtimeBrokerRequest == null) {
         if (!exceptions.isEmpty()) {
           LOGGER.info("No server found for request {}: {}", requestId, query);
@@ -644,7 +718,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
           return new BrokerResponseNative(exceptions);
         } else {
           // When all segments have been pruned, we can just return an empty response.
-          return getEmptyBrokerOnlyResponse(compiledPinotQuery._pinotQuery, requestContext,
+          return getEmptyBrokerOnlyResponse(compiledPinotQuery._parsedQuery.getPinotQuery(), requestContext,
               compiledPinotQuery._tableName, requesterIdentity);
         }
       }
@@ -684,6 +758,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       int numQueriesIssued = queryRoutingTable.values().stream().mapToInt(List::size).sum();
 
       if (offlineBrokerRequest != null) {
+        // TODO(egalpin): Note that queryOptions will be the same across all logical table queries
         Map<String, String> queryOptions = offlineBrokerRequest.getPinotQuery().getQueryOptions();
         setMaxServerResponseSizeBytes(numQueriesIssued, queryOptions, tableRoutingContext._offlineTableConfig);
         // Set the query option to directly return final result for single server query unless it is explicitly disabled
@@ -763,7 +838,7 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       long totalTimeMs = System.currentTimeMillis() - requestContext.getRequestArrivalTimeMillis();
       brokerResponse.setTimeUsedMs(totalTimeMs);
       augmentStatistics(requestContext, brokerResponse);
-      if (QueryOptionsUtils.shouldDropResults(compiledPinotQuery._pinotQuery.getQueryOptions())) {
+      if (QueryOptionsUtils.shouldDropResults(compiledPinotQuery._parsedQuery.getPinotQuery().getQueryOptions())) {
         brokerResponse.setResultTable(null);
       }
       _brokerMetrics.addTimedTableValue(compiledPinotQuery._rawTableName, BrokerTimer.QUERY_TOTAL_TIME_MS, totalTimeMs,
@@ -815,12 +890,12 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
     }
 
     @Nullable
-    private BrokerRequest getBrokerRequest(@Nullable TableConfig tableConfig, CompiledPinotQuery compiledPinotQuery) {
+    private BrokerRequest _getBrokerRequest(@Nullable TableConfig tableConfig, CompiledPinotQuery compiledPinotQuery) {
       if (tableConfig == null) {
         return null;
       }
       String tableName = tableConfig.getTableName();
-      PinotQuery pinotQuery = compiledPinotQuery._serverPinotQuery.deepCopy();
+      PinotQuery pinotQuery = compiledPinotQuery._parsedQuery.getServerPinotQuery().deepCopy();
       pinotQuery.getDataSource().setTableName(tableName);
 
       if (canRouteHybrid()) {
@@ -848,12 +923,12 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
 
     @Nullable
     public BrokerRequest getOfflineBrokerRequest(CompiledPinotQuery compiledPinotQuery) {
-      return getBrokerRequest(_offlineTableConfig, compiledPinotQuery);
+      return _getBrokerRequest(_offlineTableConfig, compiledPinotQuery);
     }
 
     @Nullable
     public BrokerRequest getRealtimeBrokerRequest(CompiledPinotQuery compiledPinotQuery) {
-      return getBrokerRequest(_realtimeTableConfig, compiledPinotQuery);
+      return _getBrokerRequest(_realtimeTableConfig, compiledPinotQuery);
     }
 
     public void setFanoutTypeAndTenants(RequestContext requestContext) {
@@ -910,11 +985,11 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
     if (!offlineRoutingExists && !realtimeRoutingExists) {
       // No table matches the request
       if (realtimeTableConfig == null && offlineTableConfig == null) {
-        LOGGER.info("Table not found for request {}: {}", requestId, compiledPinotQuery._rawQuery);
+        LOGGER.info("Table not found for request {}: {}", requestId, compiledPinotQuery._parsedQuery._rawQuery);
         tableRoutingContext._exception = QueryException.TABLE_DOES_NOT_EXIST_ERROR;
         return tableRoutingContext;
       }
-      LOGGER.info("No table matches for request {}: {}", requestId, compiledPinotQuery._rawQuery);
+      LOGGER.info("No table matches for request {}: {}", requestId, compiledPinotQuery._parsedQuery._rawQuery);
       _brokerMetrics.addMeteredGlobalValue(BrokerMeter.RESOURCE_MISSING_EXCEPTIONS, 1);
       tableRoutingContext._exception = QueryException.BROKER_RESOURCE_MISSING_ERROR;
       return tableRoutingContext;
