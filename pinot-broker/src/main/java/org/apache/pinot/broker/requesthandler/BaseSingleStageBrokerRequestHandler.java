@@ -358,7 +358,6 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       }
 
       return parsedQuery;
-
     } catch (Exception e) {
       LOGGER.info("Caught exception while compiling SQL request {}: {}, {}", requestId, query, e.getMessage());
       _brokerMetrics.addMeteredGlobalValue(BrokerMeter.REQUEST_COMPILATION_EXCEPTIONS, 1);
@@ -573,7 +572,8 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
         BrokerRequest serverBrokerRequest = parsedQuery.getCleanServerBrokerRequest();
 
         // TODO(egalpin): get all tables associated with query, loop through them and replace table name in each
-        //  iteration via serverBrokerRequest.getQuerySource().setTableName(), and then run accessControl.authorize again.
+        //  iteration via serverBrokerRequest.getQuerySource().setTableName(), and then run accessControl.authorize
+        //  again.
         authorizeRequest(requestId, accessControl, requesterIdentity, requestContext, compiledPinotQuery,
             serverBrokerRequest, httpHeaders);
 
@@ -584,7 +584,8 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
               String.format("Request %d: %s exceeds query quota for database: %s", requestId, query, database);
           LOGGER.info(errorMessage);
           requestContext.setErrorCode(QueryException.TOO_MANY_REQUESTS_ERROR_CODE);
-          return new BrokerResponseNative(QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
+          return new BrokerResponseNative(
+              QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
         }
         if (!_queryQuotaManager.acquire(compiledPinotQuery._tableName)) {
           String errorMessage = String.format("Request %d: %s exceeds query quota for table: %s", requestId, query,
@@ -592,7 +593,8 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
           LOGGER.info(errorMessage);
           requestContext.setErrorCode(QueryException.TOO_MANY_REQUESTS_ERROR_CODE);
           _brokerMetrics.addMeteredTableValue(compiledPinotQuery._rawTableName, BrokerMeter.QUERY_QUOTA_EXCEEDED, 1);
-          return new BrokerResponseNative(QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
+          return new BrokerResponseNative(
+              QueryException.getException(QueryException.QUOTA_EXCEEDED_ERROR, errorMessage));
         }
 
         _brokerMetrics.addMeteredTableValue(compiledPinotQuery._rawTableName, BrokerMeter.QUERIES, 1);
@@ -717,8 +719,8 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
         // NOTE: For hybrid use case, in most cases offline table and real-time table should have the same query timeout
         //       configured, but if necessary, we also allow different timeout for them.
         //       If the timeout is not the same for offline table and real-time table, use the max of offline table
-        //       remaining time and realtime table remaining time. Server side will have different remaining time set for
-        //       each table type, and broker should wait for both types to return.
+        //       remaining time and realtime table remaining time. Server side will have different remaining time set
+        //       for each table type, and broker should wait for both types to return.
         try {
           if (offlineBrokerRequest != null) {
             remainingTimeMs = Math.max(setQueryTimeout(tableRoutingContext.getOfflineTableName(),
@@ -898,7 +900,8 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
     }
 
     @Nullable
-    private BrokerRequest _getBrokerRequest(@Nullable TableConfig tableConfig, CompiledPinotQuery compiledPinotQuery) {
+    private BrokerRequest getBrokerRequestInternal(@Nullable TableConfig tableConfig,
+        CompiledPinotQuery compiledPinotQuery) {
       if (tableConfig == null) {
         return null;
       }
@@ -931,12 +934,12 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
 
     @Nullable
     public BrokerRequest getOfflineBrokerRequest(CompiledPinotQuery compiledPinotQuery) {
-      return _getBrokerRequest(_offlineTableConfig, compiledPinotQuery);
+      return getBrokerRequestInternal(_offlineTableConfig, compiledPinotQuery);
     }
 
     @Nullable
     public BrokerRequest getRealtimeBrokerRequest(CompiledPinotQuery compiledPinotQuery) {
-      return _getBrokerRequest(_realtimeTableConfig, compiledPinotQuery);
+      return getBrokerRequestInternal(_realtimeTableConfig, compiledPinotQuery);
     }
 
     public void setFanoutTypeAndTenants(RequestContext requestContext) {

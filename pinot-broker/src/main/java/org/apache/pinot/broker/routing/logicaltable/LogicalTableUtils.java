@@ -22,6 +22,9 @@ import java.util.List;
 
 
 public class LogicalTableUtils {
+  private LogicalTableUtils() {
+  }
+
   public static List<String> getAllAssociatedTableNames(String tableName) {
     // TODO(egalpin): implement non-dummy version
     return List.of(tableName);
