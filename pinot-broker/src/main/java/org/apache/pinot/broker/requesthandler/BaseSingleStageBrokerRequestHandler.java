@@ -291,9 +291,9 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       _serverPinotQuery = GapfillUtils.stripGapfill(_pinotQuery);
 
       if (_pinotQuery == _serverPinotQuery) {
-        _isGapFillStripped = true;
-      } else {
         _isGapFillStripped = false;
+      } else {
+        _isGapFillStripped = true;
       }
     }
 
@@ -568,7 +568,6 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
         // Second-stage table-level access control
         // TODO: Modify AccessControl interface to directly take PinotQuery
         // TODO(egalpin): perform authorization for each physical table in Logical table?
-        BrokerRequest brokerRequest = parsedQuery.getCleanBrokerRequest();
         BrokerRequest serverBrokerRequest = parsedQuery.getCleanServerBrokerRequest();
 
         // TODO(egalpin): get all tables associated with query, loop through them and replace table name in each
@@ -782,7 +781,12 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
       _brokerMetrics.addPhaseTiming(originalRawTableName, BrokerQueryPhase.QUERY_ROUTING,
           routingEndTimeNs - routingStartTimeNs);
 
-      BrokerRequest serverBrokerRequest = parsedQuery.getCleanServerBrokerRequest();
+      BrokerRequest brokerRequest = parsedQuery.getCleanBrokerRequest();
+      BrokerRequest serverBrokerRequest = brokerRequest;
+
+      if (parsedQuery.isGapFillStripped()) {
+         serverBrokerRequest = parsedQuery.getCleanServerBrokerRequest();
+      }
 
       // Set the maximum serialized response size per server, and ask server to directly return final response when only
       // one server is queried
@@ -818,16 +822,17 @@ public abstract class BaseSingleStageBrokerRequestHandler extends BaseBrokerRequ
         _queriesById.put(requestId, new QueryServers(query, queryRoutingTable));
         LOGGER.debug("Keep track of running query: {}", requestId);
         try {
-          brokerResponse = processBrokerRequest(requestId, parsedQuery.getCleanBrokerRequest(),
-              parsedQuery.getCleanServerBrokerRequest(), queryRoutingTable, remainingTimeMs, serverStats,
-              requestContext);
+          brokerResponse =
+              processBrokerRequest(requestId, brokerRequest, serverBrokerRequest, queryRoutingTable, remainingTimeMs,
+                  serverStats, requestContext);
         } finally {
           _queriesById.remove(requestId);
           LOGGER.debug("Remove track of running query: {}", requestId);
         }
       } else {
-        brokerResponse = processBrokerRequest(requestId, parsedQuery.getCleanBrokerRequest(),
-            parsedQuery.getCleanServerBrokerRequest(), queryRoutingTable, remainingTimeMs, serverStats, requestContext);
+        brokerResponse =
+            processBrokerRequest(requestId, brokerRequest, serverBrokerRequest, queryRoutingTable, remainingTimeMs,
+                serverStats, requestContext);
       }
 
       for (ProcessingException exception : exceptions) {
